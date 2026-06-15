@@ -115,6 +115,18 @@
   @keyframes heroZoom { 0% { transform: scale(1.12); } 100% { transform: scale(1); } }
   @keyframes shake { 0%,100%{transform:translateX(0)} 15%{transform:translateX(-6px)} 30%{transform:translateX(6px)} 45%{transform:translateX(-5px)} 60%{transform:translateX(5px)} 75%{transform:translateX(-3px)} 90%{transform:translateX(3px)} }
   .btn-shake { animation: shake 0.45s ease; }
+  /* Animated gradient border for input boxes on focus — mirrors the CTA hover-border look */
+  @keyframes esSpin { to { transform: rotate(360deg); } }
+  .es-input-anim { position: relative; isolation: isolate; }
+  .es-input-anim::before {
+    content: ""; position: absolute; inset: -1.5px; border-radius: inherit; padding: 1.5px;
+    background: conic-gradient(from 0deg, transparent 0deg, rgba(255,255,255,0.95) 60deg, transparent 150deg, transparent 210deg, rgba(255,255,255,0.95) 300deg, transparent 360deg);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    opacity: 0; transition: opacity 0.3s ease; pointer-events: none; z-index: 2;
+  }
+  .es-input-anim:focus-within::before { opacity: 1; animation: esSpin 2.2s linear infinite; }
+  @media (prefers-reduced-motion: reduce) { .es-input-anim:focus-within::before { animation: none; } }
   @keyframes fadeUp {
     0% { opacity: 0; transform: translateY(20px); filter: blur(4px); }
     100% { opacity: 1; transform: translateY(0); filter: blur(0); }
@@ -464,11 +476,7 @@ function Ic({ name, size = 20, className = "", filled = false, strokeWidth = 2, 
 
 /* ---------- Routing ---------- */
 const navigate = (path) => { window.location.hash = path; };
-const goPricing = () => {
-  const onHome = (window.location.hash || "").replace(/^#\/?/, "").split("/")[0] === "";
-  if (!onHome) navigate("/");
-  setTimeout(() => { const el = document.getElementById("pricing"); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); }, onHome ? 0 : 400);
-};
+const goPricing = () => { navigate("/plans"); };
 function parseHash() {
   const h = (window.location.hash || "#/").replace(/^#/, "");
   const parts = h.split("/").filter(Boolean);
@@ -477,6 +485,7 @@ function parseHash() {
   if (parts[0] === "category") return { page: "category", param: parts[1] };
   if (parts[0] === "watch") return { page: "watch", param: parts[1] };
   if (parts[0] === "studio") return { page: "studio" };
+  if (parts[0] === "plans") return { page: "plans" };
   if (parts[0] === "demo") return { page: "demo" };
   if (parts[0] === "signup") return { page: "signup" };
   if (parts[0] === "login") return { page: "login" };
@@ -1225,11 +1234,11 @@ function Hero() {
 
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, ease: "easeOut", delay: 0.38 }}
           className="mt-7 w-full max-w-md">
-          <form onSubmit={(e) => { e.preventDefault(); search(); }} className="liquid-glass rounded-full ps-5 pe-2 py-2 flex items-center gap-3">
+          <form onSubmit={(e) => { e.preventDefault(); search(); }} className="es-input-anim liquid-glass rounded-full ps-5 pe-2 py-2 flex items-center gap-3">
             <Ic name="search" size={16} className="text-white/40 shrink-0" />
             <input value={q} onChange={(e) => setQ(e.target.value)}
-              placeholder={t("جستجو در ویدیوها…", "Search videos…")}
-              className="flex-1 bg-transparent text-white placeholder:text-white/45 text-sm focus-visible:ring-2 focus-visible:ring-white/70 min-w-0" />
+              placeholder={t("جستجو در دسته‌بندی‌ها…", "Search categories…")}
+              className="flex-1 bg-transparent text-white placeholder:text-white/45 text-sm outline-none focus:outline-none focus-visible:outline-none min-w-0" />
             <button type="submit" aria-label={t("جستجو", "Search")}
               className="bg-white rounded-full p-2.5 text-black shrink-0 active:scale-95 transition-transform">
               <Ic name={fwd()} size={18} />
@@ -1339,6 +1348,107 @@ function Pricing() {
         </Stagger>
       </div>
     </section>
+  );
+}
+
+/* ========== Plans page — a dedicated, full-screen pricing experience ========== */
+/* Intentionally a different look from the home pricing section: deep indigo
+   gradient canvas, large stacked cards, and a clear primary plan. */
+function PlansPage() {
+  const user = useUser();
+  const [sel, setSel] = React.useState("pro");
+  const activate = (p) => {
+    const u = getUser();
+    if (!u) { setAfterLogin("/plans"); navigate("/login"); return; }
+    upgradePlan(u.email, p.id); loginUser({ email: u.email }); navigate("/studio");
+  };
+  return (
+    <main className="relative min-h-screen w-full overflow-hidden"
+      style={{ background: "radial-gradient(120% 90% at 50% -10%, #1b1340 0%, #0c0a1c 45%, #060510 100%)" }}>
+      {/* Ambient glows */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[60rem] h-[60rem] rounded-full"
+          style={{ background: "radial-gradient(circle, rgba(124,92,246,0.22) 0%, transparent 60%)" }}></div>
+        <div className="absolute bottom-0 right-0 w-[40rem] h-[40rem] rounded-full"
+          style={{ background: "radial-gradient(circle, rgba(56,189,248,0.12) 0%, transparent 60%)" }}></div>
+      </div>
+
+      <div className="relative z-10 max-w-6xl mx-auto px-6 md:px-12 pt-28 sm:pt-32 pb-24">
+        <Reveal className="text-center max-w-2xl mx-auto">
+          <span className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11px] font-semibold text-white"
+            style={{ background: "rgba(124,92,246,0.22)", border: "1px solid rgba(124,92,246,0.4)" }}>
+            <Ic name="sparkles" size={12} /> {t("پلن‌های اشتراک", "Subscription plans")}
+          </span>
+          <h1 className="mt-5 text-3xl sm:text-5xl font-extrabold tracking-tight text-white leading-[1.15]">
+            {t("یک پلن بردار، هر ویدیویی را فارسی کن", "Pick a plan, subtitle anything in Persian")}
+          </h1>
+          <p className="mt-4 text-white/65 leading-7">
+            {t("زیرنویس نامحدود با هوش مصنوعی، پخش‌کنندهٔ اختصاصی و دانلود SRT/VTT. هر زمان خواستی لغو کن.",
+               "Unlimited AI subtitles, a custom player, and SRT/VTT downloads. Cancel anytime.")}
+          </p>
+        </Reveal>
+
+        <Stagger className="mt-12 grid gap-5 md:grid-cols-3 items-stretch" stagger={0.12}>
+          {PLANS.map((p) => {
+            const active = sel === p.id;
+            return (
+              <Item key={p.id} className="h-full">
+                <div role="button" tabIndex={0} onClick={() => setSel(p.id)}
+                  onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setSel(p.id)}
+                  className={`relative h-full flex flex-col rounded-[1.75rem] p-7 cursor-pointer transition-all duration-300 ${active
+                    ? "scale-[1.02] shadow-[0_30px_80px_-30px_rgba(124,92,246,0.7)]"
+                    : "hover:-translate-y-1"}`}
+                  style={active
+                    ? { background: "linear-gradient(160deg, rgba(124,92,246,0.28) 0%, rgba(30,22,64,0.9) 100%)", border: "1.5px solid rgba(167,139,250,0.7)" }
+                    : { background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                  {p.popular && (
+                    <span className="absolute -top-3 end-6 rounded-full text-[10px] font-bold px-3 py-1 text-white"
+                      style={{ background: "linear-gradient(90deg,#7c5cf6,#a78bfa)" }}>
+                      {t("پیشنهاد ما", "Recommended")}
+                    </span>
+                  )}
+                  <h3 className="text-lg font-extrabold text-white flex items-center gap-2">
+                    {planName(p)}
+                    {active && <Ic name="check" size={16} className="text-violet-300" />}
+                  </h3>
+                  <p className="mt-1 text-xs text-white/55 leading-5">{planTagline(p)}</p>
+                  <div className="mt-5 flex items-baseline gap-1.5">
+                    <span className="text-4xl font-extrabold text-white">{faPrice(p.price)}</span>
+                    <span className="text-xs text-white/50">{t("تومان / ماه", "Toman / mo")}</span>
+                  </div>
+                  <ul className="mt-6 space-y-2.5 flex-1">
+                    {p.features.map((f) => (
+                      <li key={f.t} className={`flex items-center gap-2.5 text-[13px] ${f.ok ? "text-white/90" : "text-white/35 line-through decoration-white/20"}`}>
+                        <span className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${f.ok ? "text-white" : "text-white/30"}`}
+                          style={f.ok ? { background: "rgba(124,92,246,0.5)" } : { background: "rgba(255,255,255,0.06)" }}>
+                          <Ic name={f.ok ? "check" : "x"} size={11} />
+                        </span>
+                        {featT(f)}
+                      </li>
+                    ))}
+                  </ul>
+                  <button type="button"
+                    onClick={(e) => { e.stopPropagation(); if (!active) { setSel(p.id); return; } activate(p); }}
+                    className={`mt-7 h-12 rounded-full text-sm font-bold transition-all active:scale-[0.98] ${active
+                      ? "bg-white text-black hover:bg-white/90"
+                      : "text-white hover:bg-white/10"}`}
+                    style={active ? {} : { border: "1px solid rgba(255,255,255,0.2)" }}>
+                    {active ? t("فعال‌سازی " + p.name, "Activate " + p.nameEn) : t("انتخاب این پلن", "Choose this plan")}
+                  </button>
+                </div>
+              </Item>
+            );
+          })}
+        </Stagger>
+
+        <Reveal delay={0.2} className="mt-12 text-center">
+          <button type="button" onClick={() => navigate("/")}
+            className="inline-flex items-center gap-2 text-sm text-white/55 hover:text-white transition-colors">
+            <Ic name={back()} size={15} /> {t("بازگشت به خانه", "Back to home")}
+          </button>
+        </Reveal>
+      </div>
+    </main>
   );
 }
 
@@ -1524,7 +1634,13 @@ function HomePage() {
 /* Subscribers see what they can do; everyone else sees the plans. */
 function HomePricingOrFeatures() {
   const user = useUser();
-  if (!hasSub(user)) return <Pricing />;
+  // Subscribers already have everything — no upsell / features section at the bottom.
+  if (hasSub(user)) return null;
+  return <Pricing />;
+}
+
+function _UnusedFeatures() {
+  const user = useUser();
   const FEATURES = [
     { icon: "sparkles", title: t("زیرنویس نامحدود", "Unlimited subtitles"), body: t("هر تعداد ویدیوی یوتیوب یا فایل آپلودی — بدون محدودیت.", "Any number of YouTube videos or uploaded files — no limits.") },
     { icon: "captions", title: t("پخش‌کنندهٔ اختصاصی", "Custom player"), body: t("پخش‌کنندهٔ داخلی EasySub با کنترل زیرنویس، سرعت و یادداشت.", "EasySub's built-in player with subtitle, speed, and note controls.") },
@@ -1765,10 +1881,10 @@ function BrowseHero({ title, subtitle, q, setQ, compact = false }) {
         </Reveal>
         {setQ && (
           <Reveal delay={0.15} className="mt-8 w-full max-w-xl">
-            <div className="liquid-glass rounded-full ps-6 pe-2 py-2 flex items-center gap-3">
+            <div className="es-input-anim liquid-glass rounded-full ps-6 pe-2 py-2 flex items-center gap-3">
               <input value={q} onChange={(e) => setQ(e.target.value)}
                 placeholder={t("جستجو در دسته‌بندی‌ها…", "Search categories…")}
-                className="flex-1 min-w-0 bg-transparent text-white placeholder:text-white/45 text-base focus-visible:ring-2 focus-visible:ring-white/70" />
+                className="flex-1 min-w-0 bg-transparent text-white placeholder:text-white/45 text-base outline-none focus:outline-none focus-visible:outline-none" />
               <button type="button" aria-label={t("جستجو", "Search")}
                 className="bg-white rounded-full p-3 text-black shrink-0 active:scale-95 transition-transform">
                 <Ic name="search" size={20} />
@@ -1782,25 +1898,85 @@ function BrowseHero({ title, subtitle, q, setQ, compact = false }) {
 }
 
 /* ---- Categories page: exactly 8 glass cards per page + prev/next ---- */
+/* Browse all content categories (genres) — distinct from "My Library". */
 function CategoriesPage() {
   const lib = useLibrary();
   const [q, setQ] = React.useState("");
   const query = q.trim().toLowerCase();
-  const items = query ? lib.filter((v) => (vTitle(v) + " " + (v.name || "")).toLowerCase().includes(query)) : lib;
-  const del = (v) => { if (window.confirm(t("این ویدیو از کتابخانه حذف شود؟", "Remove this video from your library?"))) removeFromLibrary(v.id); };
+  const cats = query
+    ? CATEGORIES.filter((c) => (c.name + " " + c.nameEn).toLowerCase().includes(query))
+    : CATEGORIES;
+  const countFor = (slug) => lib.filter((v) => v.categorySlug === slug).length;
 
   return (
     <div>
       <BrowseHero
-        title={t("کتابخانهٔ من", "My Library")}
-        subtitle={lib.length
-          ? t(fa(lib.length) + " ویدیو — همه با زیرنویس فارسیِ هوشمند.", lib.length + " videos — all with smart Persian subtitles.")
-          : t("هنوز ویدیویی نساخته‌ای — از استودیو شروع کن.", "No videos yet — start from the Studio.")}
+        title={t("دسته‌بندی‌ها", "Categories")}
+        subtitle={t("موضوعی را انتخاب کن و ویدیوهای آن را با زیرنویس فارسی ببین.", "Pick a topic and explore its videos with Persian subtitles.")}
         q={q} setQ={setQ} />
 
       <section className="max-w-7xl mx-auto px-6 md:px-12 pb-20">
+        {cats.length > 0 ? (
+          <Stagger className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" stagger={0.05}>
+            {cats.map((c) => (
+              <Item key={c.slug}>
+                <button type="button" onClick={() => navigate("/category/" + c.slug)}
+                  className="group relative w-full text-start overflow-hidden rounded-3xl liquid-glass-strong h-44 p-6 flex flex-col justify-between hover:bg-white/5 transition-colors">
+                  <div className="absolute inset-0 opacity-25 group-hover:opacity-35 transition-opacity">
+                    <img src={thumb(c.slug)} alt="" className="w-full h-full object-cover" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent"></div>
+                  </div>
+                  <span className="relative w-12 h-12 rounded-2xl bg-white text-black flex items-center justify-center">
+                    <Ic name={c.icon} size={22} />
+                  </span>
+                  <div className="relative">
+                    <div className="text-lg font-extrabold text-white">{catName(c.slug)}</div>
+                    <div className="mt-1 text-xs text-white/60 flex items-center gap-1.5">
+                      {countFor(c.slug) > 0
+                        ? <>{fa(countFor(c.slug))} {t("ویدیو", "videos")}</>
+                        : t("به‌زودی", "Coming soon")}
+                      <Ic name={fwd()} size={13} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </div>
+                  </div>
+                </button>
+              </Item>
+            ))}
+          </Stagger>
+        ) : (
+          <div className="mt-10 liquid-glass-strong rounded-3xl p-10 sm:p-14 text-center">
+            <span className="mx-auto w-16 h-16 rounded-2xl bg-white text-black flex items-center justify-center mb-5"><Ic name="search" size={28} /></span>
+            <h4 className="text-xl font-extrabold">{t("دسته‌ای پیدا نشد", "No category found")}</h4>
+            <p className="mt-2 text-sm text-white/65 leading-7 max-w-md mx-auto">{t("عبارت دیگری را امتحان کن.", "Try another search term.")}</p>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+/* A single content category (genre) — shows the videos tagged with it. */
+function CategoryPage({ slug }) {
+  const lib = useLibrary();
+  const c = CATEGORIES.find((x) => x.slug === slug);
+  const items = c ? lib.filter((v) => v.categorySlug === slug) : [];
+  const del = (v) => { if (window.confirm(t("این ویدیو از کتابخانه حذف شود؟", "Remove this video from your library?"))) removeFromLibrary(v.id); };
+
+  if (!c) return <CategoriesPage />;
+
+  return (
+    <div>
+      <BrowseHero compact
+        title={catName(c.slug)}
+        subtitle={items.length
+          ? t(fa(items.length) + " ویدیو در این دسته.", items.length + " videos in this category.")
+          : t("هنوز ویدیویی در این دسته نیست — یکی بساز.", "No videos in this category yet — create one.")} />
+
+      <section className="max-w-7xl mx-auto px-6 md:px-12 pb-20">
         <Reveal className="flex items-center justify-between gap-3 flex-wrap">
-          <span className="text-sm text-white/60">{items.length ? fa(items.length) + " " + t("ویدیو", "videos") : ""}</span>
+          <button type="button" onClick={() => navigate("/categories")}
+            className="flex items-center gap-2 text-sm text-white/70 hover:text-white transition-colors">
+            <Ic name={back()} size={15} /> {t("همهٔ دسته‌بندی‌ها", "All categories")}
+          </button>
           <button type="button" onClick={() => navigate("/studio")}
             className="flex items-center gap-2 rounded-full bg-white text-black font-semibold px-5 h-11 text-sm hover:bg-white/90 active:scale-[0.98] transition-all">
             <Ic name="plus" size={16} /> {t("ویدیوی جدید", "New video")}
@@ -1813,27 +1989,22 @@ function CategoriesPage() {
           </div>
         ) : (
           <div className="mt-10 liquid-glass-strong rounded-3xl p-10 sm:p-14 text-center">
-            <span className="mx-auto w-16 h-16 rounded-2xl bg-white text-black flex items-center justify-center mb-5"><Ic name={query ? "search" : "sparkles"} size={28} /></span>
-            <h4 className="text-xl font-extrabold">{query ? t("چیزی پیدا نشد", "Nothing found") : t("کتابخانه‌ات خالی است", "Your library is empty")}</h4>
+            <span className="mx-auto w-16 h-16 rounded-2xl bg-white text-black flex items-center justify-center mb-5"><Ic name={c.icon} size={28} /></span>
+            <h4 className="text-xl font-extrabold">{t("این دسته هنوز خالی است", "This category is empty")}</h4>
             <p className="mt-2 text-sm text-white/65 leading-7 max-w-md mx-auto">
-              {query ? t("عبارت دیگری را امتحان کن.", "Try another search term.") : t("یک لینک یوتیوب بده یا فایلی آپلود کن تا اولین زیرنویس فارسی‌ات ساخته شود.", "Paste a YouTube link or upload a file to create your first Persian subtitles.")}
+              {t("یک ویدیو آپلود کن یا لینک مستقیم بده تا اولین زیرنویس فارسی این دسته ساخته شود.", "Upload a video or paste a direct link to create the first Persian subtitles here.")}
             </p>
-            {!query && (
-              <div className="mt-6 flex justify-center">
-                <HoverBorderGradient onClick={() => navigate("/studio")} className="px-7 py-2.5">
-                  <Ic name="upload" size={15} /> {t("رفتن به استودیو", "Go to Studio")}
-                </HoverBorderGradient>
-              </div>
-            )}
+            <div className="mt-6 flex justify-center">
+              <HoverBorderGradient onClick={() => navigate("/studio")} className="px-7 py-2.5">
+                <Ic name="upload" size={15} /> {t("رفتن به استودیو", "Go to Studio")}
+              </HoverBorderGradient>
+            </div>
           </div>
         )}
       </section>
     </div>
   );
 }
-
-/* Legacy /category/* links now fold into the single Library page */
-function CategoryPage() { return <CategoriesPage />; }
 
 Object.assign(window, { CategoriesPage, CategoryPage, BrowseHero });
 
@@ -2196,8 +2367,8 @@ function StudioLocked() {
             <div key={f} className="flex items-center gap-2.5 text-sm text-white/85"><span className="w-5 h-5 rounded-full bg-white text-black flex items-center justify-center shrink-0"><Ic name="check" size={12} /></span> {f}</div>
           ))}
         </div>
-        <div className="mt-8">
-          <HoverBorderGradient onClick={goPricing} className="px-7 py-3 w-full justify-center">
+        <div className="mt-8 flex justify-center">
+          <HoverBorderGradient onClick={goPricing} className="px-7 py-3">
             <Ic name="sparkles" size={15} /> {t("مشاهده و خرید پلن", "View & buy a plan")}
           </HoverBorderGradient>
         </div>
@@ -2329,12 +2500,12 @@ function StudioInner() {
 
               {mode === "link" ? (
                 <div>
-                <div className="liquid-glass mt-6 rounded-full ps-5 pe-1.5 py-1.5 flex items-center gap-3">
+                <div className="es-input-anim liquid-glass mt-6 rounded-full ps-5 pe-1.5 py-1.5 flex items-center gap-3">
                   <Ic name="link" size={16} className="text-white/40 shrink-0" />
                   <input value={link} onChange={(e) => setLink(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && start()}
-                    placeholder={t("لینک یوتیوب یا لینک مستقیم ویدیو…", "YouTube link or direct video link…")}
-                    className="flex-1 min-w-0 bg-transparent h-10 text-sm text-white placeholder:text-white/45 focus-visible:ring-2 focus-visible:ring-white/70" dir="ltr" style={{ textAlign: "left" }} />
+                    placeholder={t("لینک مستقیم ویدیو یا صدا…", "Direct video or audio link…")}
+                    className="flex-1 min-w-0 bg-transparent h-10 text-sm text-white placeholder:text-white/45 outline-none focus:outline-none focus-visible:outline-none" dir="ltr" style={{ textAlign: "left" }} />
                   <button type="button" onClick={start} aria-label={t("پردازش", "Process")}
                     className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-95 ${link.trim() ? "bg-white text-black" : "bg-white/10 text-white/30"}`}>
                     <Ic name={fwd()} size={18} />
@@ -2362,7 +2533,7 @@ function StudioInner() {
                   ) : (
                     <>
                       <p className="mt-3 text-sm text-white font-semibold">{t("فایل ویدیو را این‌جا رها کن", "Drop your video file here")}</p>
-                      <p className="mt-1 text-xs text-white/65">{t("MP4 / MP3 — حداکثر ۲۰ مگابایت. برای فایل بزرگ‌تر، لینک یوتیوب یا لینک مستقیم ویدیو را بده.", "MP4 / MP3 — up to 20 MB. For larger files, paste a YouTube or direct media link.")}</p>
+                      <p className="mt-1 text-xs text-white/65">{t("MP4 / MP3 — حداکثر ۲۰ مگابایت. برای فایل بزرگ‌تر، لینک مستقیم ویدیو یا صدا را بده.", "MP4 / MP3 — up to 20 MB. For larger files, paste a direct video or audio link.")}</p>
                     </>
                   )}
                 </div>
@@ -2489,11 +2660,11 @@ function InputGroup({ label, placeholder, type = "text", helper, ltr, value, onC
   return (
     <div className="space-y-2">
       <label htmlFor={id} className="text-sm font-medium text-white">{label}</label>
-      <div className={`rounded-full relative transition-colors ${hasError ? "ring-2 ring-red-400/80 bg-red-500/10" : "liquid-glass"}`}>
+      <div className={`rounded-full relative transition-colors ${hasError ? "ring-2 ring-red-400/80 bg-red-500/10" : "es-input-anim liquid-glass"}`}>
         <input id={id} type={isPass && show ? "text" : type} placeholder={placeholder}
           value={value} onChange={onChange} required={required}
           dir={ltr ? "ltr" : undefined} style={ltr ? { textAlign: "left" } : undefined}
-          className="w-full bg-transparent rounded-full h-12 px-5 text-sm text-white placeholder:text-white/45 focus-visible:ring-2 focus-visible:ring-white/70 focus:ring-1 focus:ring-white/30" />
+          className="w-full bg-transparent rounded-full h-12 px-5 text-sm text-white placeholder:text-white/45 outline-none focus:outline-none focus-visible:outline-none" />
         {isPass && (
           <button type="button" onClick={() => setShow(!show)} aria-label={t(show ? "پنهان کردن رمز" : "نمایش رمز", show ? "Hide password" : "Show password")}
             className="absolute top-1/2 -translate-y-1/2 end-4 text-white/60 hover:text-white/90 transition-colors">
@@ -3232,6 +3403,7 @@ function App() {
   else if (route.page === "category") page = <CategoryPage slug={route.param} />;
   else if (route.page === "watch") page = <WatchPage id={route.param} />;
   else if (route.page === "studio") page = <StudioPage />;
+  else if (route.page === "plans") page = <PlansPage />;
   else if (route.page === "demo") page = <DemoPage />;
   else if (route.page === "signup") page = <SignupPage />;
   else if (route.page === "login") page = <LoginPage />;
