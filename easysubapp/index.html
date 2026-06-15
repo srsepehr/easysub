@@ -115,18 +115,6 @@
   @keyframes heroZoom { 0% { transform: scale(1.12); } 100% { transform: scale(1); } }
   @keyframes shake { 0%,100%{transform:translateX(0)} 15%{transform:translateX(-6px)} 30%{transform:translateX(6px)} 45%{transform:translateX(-5px)} 60%{transform:translateX(5px)} 75%{transform:translateX(-3px)} 90%{transform:translateX(3px)} }
   .btn-shake { animation: shake 0.45s ease; }
-  /* Animated gradient border for input boxes on focus — mirrors the CTA hover-border look */
-  @keyframes esSpin { to { transform: rotate(360deg); } }
-  .es-input-anim { position: relative; isolation: isolate; }
-  .es-input-anim::before {
-    content: ""; position: absolute; inset: -1.5px; border-radius: inherit; padding: 1.5px;
-    background: conic-gradient(from 0deg, transparent 0deg, rgba(255,255,255,0.95) 60deg, transparent 150deg, transparent 210deg, rgba(255,255,255,0.95) 300deg, transparent 360deg);
-    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-    -webkit-mask-composite: xor; mask-composite: exclude;
-    opacity: 0; transition: opacity 0.3s ease; pointer-events: none; z-index: 2;
-  }
-  .es-input-anim:focus-within::before { opacity: 1; animation: esSpin 2.2s linear infinite; }
-  @media (prefers-reduced-motion: reduce) { .es-input-anim:focus-within::before { animation: none; } }
   @keyframes fadeUp {
     0% { opacity: 0; transform: translateY(20px); filter: blur(4px); }
     100% { opacity: 1; transform: translateY(0); filter: blur(0); }
@@ -1234,7 +1222,7 @@ function Hero() {
 
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, ease: "easeOut", delay: 0.38 }}
           className="mt-7 w-full max-w-md">
-          <form onSubmit={(e) => { e.preventDefault(); search(); }} className="es-input-anim liquid-glass rounded-full ps-5 pe-2 py-2 flex items-center gap-3">
+          <form onSubmit={(e) => { e.preventDefault(); search(); }} className="liquid-glass rounded-full ps-5 pe-2 py-2 flex items-center gap-3">
             <Ic name="search" size={16} className="text-white/40 shrink-0" />
             <input value={q} onChange={(e) => setQ(e.target.value)}
               placeholder={t("جستجو در دسته‌بندی‌ها…", "Search categories…")}
@@ -1881,7 +1869,7 @@ function BrowseHero({ title, subtitle, q, setQ, compact = false }) {
         </Reveal>
         {setQ && (
           <Reveal delay={0.15} className="mt-8 w-full max-w-xl">
-            <div className="es-input-anim liquid-glass rounded-full ps-6 pe-2 py-2 flex items-center gap-3">
+            <div className="liquid-glass rounded-full ps-6 pe-2 py-2 flex items-center gap-3">
               <input value={q} onChange={(e) => setQ(e.target.value)}
                 placeholder={t("جستجو در دسته‌بندی‌ها…", "Search categories…")}
                 className="flex-1 min-w-0 bg-transparent text-white placeholder:text-white/45 text-base outline-none focus:outline-none focus-visible:outline-none" />
@@ -2383,13 +2371,20 @@ function StudioInner() {
   const [file, setFile] = React.useState(null);
   const [fileName, setFileName] = React.useState("");
   const [stage, setStage] = React.useState("input"); // input | processing
-  const [step, setStep] = React.useState(0);
+  const [pct, setPct] = React.useState(0);           // real 0–100 progress from the server
+  const [stageKey, setStageKey] = React.useState("download");
   const [done, setDone] = React.useState(false);
   const [drag, setDrag] = React.useState(false);
   const [error, setError] = React.useState("");
   const fileInputRef = React.useRef(null);
   const newIdRef = React.useRef(null);
-  const STEPS = studioSteps();
+
+  const STAGE_LABELS = {
+    download: t("دریافت ویدیو…", "Fetching the video…"),
+    transcribe: t("استخراج گفتار…", "Extracting speech…"),
+    translate: t("ترجمه به فارسی…", "Translating to Persian…"),
+    build: t("ساخت زیرنویس…", "Building subtitles…"),
+  };
 
   const pickFile = (f) => {
     if (!f) return;
@@ -2406,8 +2401,8 @@ function StudioInner() {
     rd.readAsDataURL(f);
   });
 
-  // Real pipeline: send the file/link to the serverless Gemini function,
-  // store the Persian subtitles, then let the stepper finish + navigate.
+  // Real pipeline: stream the serverless function's NDJSON progress so the bar
+  // reflects exact progress, then store the Persian subtitles and navigate.
   const runPipeline = async () => {
     try {
       let body;
@@ -2421,8 +2416,33 @@ function StudioInner() {
         body = { mediaBase64: b64, mimeType: file.type || "video/mp4" };
       }
       const r = await fetch("/api/subtitle", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const data = await r.json();
-      if (!r.ok) throw new Error((data && data.error) || ("خطای سرور HTTP " + r.status));
+      if (!r.body) {
+        const data = await r.json().catch(() => null);
+        throw new Error((data && data.error) || ("خطای سرور HTTP " + r.status));
+      }
+
+      // Read the NDJSON stream line-by-line.
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "", result = null, errMsg = null;
+      while (true) {
+        const { done: rdone, value } = await reader.read();
+        if (value) buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let msg; try { msg = JSON.parse(line); } catch (e) { continue; }
+          if (msg.type === "progress") { setPct(msg.pct); if (msg.stage) setStageKey(msg.stage); }
+          else if (msg.type === "result") { result = msg; }
+          else if (msg.type === "error") { errMsg = msg.error; }
+        }
+        if (rdone) break;
+      }
+      if (errMsg) throw new Error(errMsg);
+      if (!result) throw new Error(t("پاسخی از سرور دریافت نشد. دوباره امتحان کن.", "No response from the server. Please try again."));
+
       const url = mode === "link" ? link.trim() : "";
       const yid = mode === "link" ? ytId(url) : null;
       const kind = yid ? "youtube" : (mode === "link" ? "url" : "file");
@@ -2436,10 +2456,11 @@ function StudioInner() {
         mediaUrl: kind === "youtube" ? "" : (mode === "link" ? url : URL.createObjectURL(file)),
         mimeType: mode === "link" ? "" : (file.type || "video/mp4"),
         thumb: yid ? ytThumb(yid) : "",
-        cues: data.cues || [], srt: data.srt || "", vtt: data.vtt || "",
-        durationSec: (data.cues && data.cues.length) ? Math.ceil(data.cues[data.cues.length - 1].end) : 0,
+        cues: result.cues || [], srt: result.srt || "", vtt: result.vtt || "",
+        durationSec: (result.cues && result.cues.length) ? Math.ceil(result.cues[result.cues.length - 1].end) : 0,
         createdAt: Date.now(),
       };
+      setPct(100);
       saveToLibrary(item);
       window.__EASYSUB_RESULT = item;
       newIdRef.current = item.id;
@@ -2448,24 +2469,19 @@ function StudioInner() {
       // The API already returns Persian error messages — show them as-is
       const msg = String((e && e.message) || e);
       setError(msg || t("خطای ناشناخته‌ای رخ داد.", "An unknown error occurred."));
-      setStage("input"); setStep(0); setDone(false);
+      setStage("input"); setPct(0); setDone(false);
     }
   };
 
   React.useEffect(() => {
-    if (stage !== "processing") return;
-    if (step >= STEPS.length) {
-      const tt = setTimeout(() => navigate("/watch/" + (newIdRef.current || "studio")), 700);
+    if (stage === "processing" && done) {
+      const tt = setTimeout(() => navigate("/watch/" + (newIdRef.current || "studio")), 650);
       return () => clearTimeout(tt);
     }
-    // Hold on the final step until the real backend resolves (done = true).
-    if (step >= STEPS.length - 1 && !done) return;
-    const tt = setTimeout(() => setStep((s) => s + 1), 1300);
-    return () => clearTimeout(tt);
-  }, [stage, step, done]);
+  }, [stage, done]);
 
   const ready = mode === "link" ? !!link.trim() : !!file;
-  const start = () => { if (!ready) return; setError(""); setStep(0); setDone(false); setStage("processing"); runPipeline(); };
+  const start = () => { if (!ready) return; setError(""); setPct(0); setStageKey("download"); setDone(false); setStage("processing"); runPipeline(); };
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#141414] flex flex-col">
@@ -2500,11 +2516,11 @@ function StudioInner() {
 
               {mode === "link" ? (
                 <div>
-                <div className="es-input-anim liquid-glass mt-6 rounded-full ps-5 pe-1.5 py-1.5 flex items-center gap-3">
+                <div className="liquid-glass mt-6 rounded-full ps-5 pe-1.5 py-1.5 flex items-center gap-3">
                   <Ic name="link" size={16} className="text-white/40 shrink-0" />
                   <input value={link} onChange={(e) => setLink(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && start()}
-                    placeholder={t("لینک مستقیم ویدیو یا صدا…", "Direct video or audio link…")}
+                    placeholder={t("لینک یوتیوب یا لینک مستقیم ویدیو…", "YouTube link or direct video link…")}
                     className="flex-1 min-w-0 bg-transparent h-10 text-sm text-white placeholder:text-white/45 outline-none focus:outline-none focus-visible:outline-none" dir="ltr" style={{ textAlign: "left" }} />
                   <button type="button" onClick={start} aria-label={t("پردازش", "Process")}
                     className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-all active:scale-95 ${link.trim() ? "bg-white text-black" : "bg-white/10 text-white/30"}`}>
@@ -2512,7 +2528,7 @@ function StudioInner() {
                   </button>
                 </div>
                 <p className="mt-2.5 text-center text-[11px] text-white/55" style={{ textShadow: "0 1px 10px rgba(0,0,0,0.8)" }}>
-                  {t("یک لینک مستقیم .mp4/.mp3/.wav وارد کن", "Paste a direct .mp4/.mp3/.wav link")}
+                  {t("لینک یوتیوب یا لینک مستقیم .mp4/.mp3/.wav وارد کن", "Paste a YouTube link or a direct .mp4/.mp3/.wav link")}
                 </p>
                 </div>
               ) : (
@@ -2555,26 +2571,27 @@ function StudioInner() {
                 <ShinyText text={t("هوش مصنوعی EasySub در حال ساخت زیرنویس فارسی است…", "EasySub AI is crafting your Persian subtitles…")} speed={3} />
               </h2>
               <p className="mt-1.5 text-xs text-white/45 truncate" dir="ltr" style={{ textAlign: "left" }}>{mode === "link" ? link : fileName}</p>
-              <div className="mt-6 space-y-3.5">
-                {STEPS.map((s, i) => {
-                  const done = i < step, active = i === step;
-                  return (
-                    <div key={s} className="flex items-center gap-3.5 opacity-0 animate-fade-up" style={{ animationDelay: (0.15 + i * 0.12) + "s" }}>
-                      <motion.span animate={{ scale: active ? [1, 1.12, 1] : 1 }} transition={{ repeat: active ? Infinity : 0, duration: 1.2 }}
-                        className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 transition-colors ${done ? "bg-white text-black" : active ? "liquid-glass text-white" : "bg-white/5 text-white/30"}`}>
-                        {done ? <Ic name="check" size={14} /> : fa(i + 1)}
-                      </motion.span>
-                      {active
-                        ? <span className="text-sm font-semibold"><ShinyText text={s} speed={2.2} /></span>
-                        : <span className={`text-sm ${done ? "text-white/65 line-through decoration-white/20" : "text-white/60"}`}>{s}</span>}
-                      {active && (
-                        <motion.div className="ms-auto h-1 w-20 sm:w-28 rounded-full bg-white/10 overflow-hidden">
-                          <motion.div className="h-full bg-white" initial={{ width: "0%" }} animate={{ width: "100%" }} transition={{ duration: 1.4, ease: "easeOut" }}></motion.div>
-                        </motion.div>
-                      )}
-                    </div>
-                  );
-                })}
+
+              {/* Exact progress bar driven by the server stream */}
+              <div className="mt-7">
+                <div className="flex items-center justify-between mb-2.5">
+                  <span className="text-sm font-semibold text-white flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full border-2 border-white/25 border-t-white animate-spin"></span>
+                    {STAGE_LABELS[stageKey] || STAGE_LABELS.download}
+                  </span>
+                  <span className="text-sm font-extrabold tabular-nums text-white">{fa(Math.round(pct))}٪</span>
+                </div>
+                <div className="h-2.5 w-full rounded-full bg-white/10 overflow-hidden">
+                  <motion.div className="h-full rounded-full bg-white"
+                    animate={{ width: pct + "%" }} transition={{ duration: 0.45, ease: "easeOut" }} />
+                </div>
+                <div className="mt-3 flex items-center justify-between text-[11px] text-white/45">
+                  {[["download", t("دریافت", "Fetch")], ["transcribe", t("گفتار", "Speech")], ["translate", t("ترجمه", "Translate")], ["build", t("ساخت", "Build")]].map(([k, lbl], idx) => {
+                    const order = ["download", "transcribe", "translate", "build"];
+                    const reached = order.indexOf(stageKey) >= idx || pct >= 100;
+                    return <span key={k} className={reached ? "text-white/80 font-semibold" : ""}>{lbl}</span>;
+                  })}
+                </div>
               </div>
             </motion.div>
           )}
@@ -2660,7 +2677,7 @@ function InputGroup({ label, placeholder, type = "text", helper, ltr, value, onC
   return (
     <div className="space-y-2">
       <label htmlFor={id} className="text-sm font-medium text-white">{label}</label>
-      <div className={`rounded-full relative transition-colors ${hasError ? "ring-2 ring-red-400/80 bg-red-500/10" : "es-input-anim liquid-glass"}`}>
+      <div className={`rounded-full relative transition-colors ${hasError ? "ring-2 ring-red-400/80 bg-red-500/10" : "liquid-glass"}`}>
         <input id={id} type={isPass && show ? "text" : type} placeholder={placeholder}
           value={value} onChange={onChange} required={required}
           dir={ltr ? "ltr" : undefined} style={ltr ? { textAlign: "left" } : undefined}
