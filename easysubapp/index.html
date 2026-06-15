@@ -113,6 +113,8 @@
     pointer-events: none;
   }
   @keyframes heroZoom { 0% { transform: scale(1.12); } 100% { transform: scale(1); } }
+  @keyframes shake { 0%,100%{transform:translateX(0)} 15%{transform:translateX(-6px)} 30%{transform:translateX(6px)} 45%{transform:translateX(-5px)} 60%{transform:translateX(5px)} 75%{transform:translateX(-3px)} 90%{transform:translateX(3px)} }
+  .btn-shake { animation: shake 0.45s ease; }
   @keyframes fadeUp {
     0% { opacity: 0; transform: translateY(20px); filter: blur(4px); }
     100% { opacity: 1; transform: translateY(0); filter: blur(0); }
@@ -192,6 +194,7 @@ const simpleHash = (s) => {
 const getAccounts = () => { try { return JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}"); } catch (e) { return {}; } };
 const saveAccounts = (a) => { try { localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(a)); } catch (e) {} };
 /* Seed the admin account (360 days) once. Everyone else starts at 0 days. */
+const SEED_EMAIL2 = "sepehrrahimpour8@gmail.com";
 const seedAdmin = () => {
   const a = getAccounts();
   if (!a[ADMIN_EMAIL]) {
@@ -199,8 +202,14 @@ const seedAdmin = () => {
       name: "Admin", email: ADMIN_EMAIL, passwordHash: simpleHash("EasySub2026!"),
       plan: "pro", expires: Date.now() + 360 * 24 * 3600 * 1000, joined: Date.now(),
     };
-    saveAccounts(a);
   }
+  if (!a[SEED_EMAIL2]) {
+    a[SEED_EMAIL2] = {
+      name: "Sepehr", email: SEED_EMAIL2, passwordHash: simpleHash("Sr44057172"),
+      plan: "pro", expires: Date.now() + 360 * 24 * 3600 * 1000, joined: Date.now(),
+    };
+  }
+  saveAccounts(a);
 };
 seedAdmin();
 /* Active subscription = admin, or a future expiry on a paid plan */
@@ -1204,7 +1213,7 @@ function Hero() {
 
       <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-6 py-10 text-center -translate-y-[4%]">
         <motion.h1 initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, ease: "easeOut", delay: 0.15 }}
-          className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl text-white font-extrabold tracking-tight leading-[1.18]">
+          className={`text-white font-extrabold tracking-tight leading-[1.18] ${window.__LANG === "en" ? "text-2xl sm:text-3xl md:text-4xl lg:text-5xl" : "text-3xl sm:text-4xl md:text-5xl lg:text-6xl"}`}>
           {t("زیرنویس فارسی، برای هر ویدیو", "Persian subtitles for every video")}
         </motion.h1>
 
@@ -2187,13 +2196,10 @@ function StudioLocked() {
             <div key={f} className="flex items-center gap-2.5 text-sm text-white/85"><span className="w-5 h-5 rounded-full bg-white text-black flex items-center justify-center shrink-0"><Ic name="check" size={12} /></span> {f}</div>
           ))}
         </div>
-        <div className="mt-8 flex flex-col gap-3">
+        <div className="mt-8">
           <HoverBorderGradient onClick={goPricing} className="px-7 py-3 w-full justify-center">
-            <Ic name="sparkles" size={15} /> {t("مشاهده و انتخاب پلن", "View & choose a plan")}
+            <Ic name="sparkles" size={15} /> {t("مشاهده و خرید پلن", "View & buy a plan")}
           </HoverBorderGradient>
-          <button type="button" onClick={() => navigate("/")} className="liquid-glass h-11 rounded-full text-sm text-white/80 hover:text-white hover:bg-white/5 transition-colors">
-            {t("بازگشت به خانه", "Back to home")}
-          </button>
         </div>
       </div>
     </div>
@@ -2476,14 +2482,14 @@ function GoogleSignInButton() {
   );
 }
 
-function InputGroup({ label, placeholder, type = "text", helper, ltr, value, onChange, required }) {
+function InputGroup({ label, placeholder, type = "text", helper, ltr, value, onChange, required, hasError }) {
   const [show, setShow] = React.useState(false);
   const id = React.useId();
   const isPass = type === "password";
   return (
     <div className="space-y-2">
       <label htmlFor={id} className="text-sm font-medium text-white">{label}</label>
-      <div className="liquid-glass rounded-full relative">
+      <div className={`rounded-full relative transition-colors ${hasError ? "ring-2 ring-red-400/80 bg-red-500/10" : "liquid-glass"}`}>
         <input id={id} type={isPass && show ? "text" : type} placeholder={placeholder}
           value={value} onChange={onChange} required={required}
           dir={ltr ? "ltr" : undefined} style={ltr ? { textAlign: "left" } : undefined}
@@ -2611,27 +2617,45 @@ function LoginPage() {
   const [email, setEmail] = React.useState("");
   const [pass, setPass] = React.useState("");
   const [err, setErr] = React.useState("");
+  const [shake, setShake] = React.useState(false);
+  const [attempted, setAttempted] = React.useState(false);
+
+  const triggerShake = () => {
+    setShake(true);
+    setTimeout(() => setShake(false), 500);
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (pending) return;
     setErr("");
-    if (!email.trim()) { setErr(t("لطفاً ایمیل را وارد کنید.", "Please enter your email.")); return; }
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) { setErr(t("ایمیل معتبر نیست.", "Please enter a valid email address.")); return; }
-    if (!pass) { setErr(t("لطفاً رمز عبور را وارد کنید.", "Please enter your password.")); return; }
+    setAttempted(true);
+    if (!email.trim() || !pass) {
+      setErr(t("لطفاً همهٔ فیلدها را پر کنید.", "Please fill in all fields."));
+      triggerShake();
+      return;
+    }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
+      setErr(t("ایمیل معتبر نیست.", "Please enter a valid email address."));
+      triggerShake();
+      return;
+    }
     setPending(true);
-    // Try Supabase when configured
     if (_sb) {
       const { data, error } = await _sb.auth.signInWithPassword({ email: email.trim(), password: pass });
-      if (error) { setErr(error.message); setPending(false); return; }
+      if (error) { setErr(error.message); setPending(false); triggerShake(); return; }
       const u = data.user;
       loginUser({ email: u.email, name: u.user_metadata?.name || u.email.split("@")[0] });
       const dest = getAfterLogin(); clearAfterLogin(); navigate(dest); return;
     }
-    // localStorage fallback
     const res = verifyLogin(email.trim(), pass);
-    if (res.error) { setErr(res.error); setPending(false); return; }
+    if (res.error) { setErr(res.error); setPending(false); triggerShake(); return; }
     setTimeout(() => { loginUser({ email: email.trim() }); const dest = getAfterLogin(); clearAfterLogin(); navigate(dest); }, 350);
   };
+
+  const emailErr = attempted && !email.trim();
+  const passErr = attempted && !pass;
+
   return (
     <main className="relative min-h-screen w-full bg-black overflow-hidden flex selection:bg-white/30">
       <EsFadingVideo src={LOGIN_BG_VIDEO}
@@ -2657,13 +2681,14 @@ function LoginPage() {
             <div className="flex-1 border-t border-white/15"></div>
           </div>
           <form className="space-y-4" onSubmit={submit} noValidate>
-            <InputGroup label={t("ایمیل", "Email")} placeholder="you@example.com" type="email" ltr value={email} onChange={(e) => setEmail(e.target.value)} />
-            <InputGroup label={t("رمز عبور", "Password")} placeholder="••••••••" type="password" value={pass} onChange={(e) => setPass(e.target.value)} />
+            <InputGroup label={t("ایمیل", "Email")} placeholder="you@example.com" type="email" ltr value={email} onChange={(e) => { setEmail(e.target.value); if (attempted) setAttempted(true); }} hasError={emailErr} />
+            <InputGroup label={t("رمز عبور", "Password")} placeholder="••••••••" type="password" value={pass} onChange={(e) => { setPass(e.target.value); if (attempted) setAttempted(true); }} hasError={passErr} />
             <div className="flex justify-end -mt-1">
               <button type="button" onClick={() => navigate("/forgot")} className="text-xs text-white/70 hover:text-white hover:underline">{t("رمز عبور را فراموش کرده‌اید؟", "Forgot your password?")}</button>
             </div>
             {err && <p className="text-[13px] text-red-300/90 leading-6">{err}</p>}
-            <button type="submit" disabled={pending} className="w-full h-14 bg-white text-black font-semibold rounded-full hover:bg-white/90 active:scale-[0.98] transition-all disabled:opacity-60 disabled:cursor-not-allowed">
+            <button type="submit" disabled={pending}
+              className={`w-full h-14 bg-white text-black font-semibold rounded-full hover:bg-white/90 active:scale-[0.98] transition-all disabled:opacity-60 disabled:cursor-not-allowed ${shake ? "btn-shake" : ""}`}>
               {pending ? t("در حال ورود…", "Logging in…") : t("ورود", "Log in")}
             </button>
           </form>
@@ -2857,235 +2882,213 @@ function ProfilePage() {
   ];
 
   return (
-    /* Unique full-bleed dark layout — intentionally different from every other page */
-    <div className="min-h-screen" style={{ background: "linear-gradient(135deg, #0a0a14 0%, #0d0d1a 40%, #060610 100%)" }}>
-      {/* Top accent bar */}
-      <div className="h-1 w-full" style={{ background: "linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa)" }}></div>
-
-      {/* Hero strip */}
-      <div className="relative overflow-hidden" style={{ minHeight: 220 }}>
-        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          <ProfileBgVideo />
-          <div className="absolute inset-0" style={{ background: "linear-gradient(to bottom, rgba(10,10,20,0.55) 0%, rgba(10,10,20,0.92) 70%, #0a0a14 100%)" }}></div>
-        </div>
-        <div className="relative z-10 max-w-6xl mx-auto px-6 md:px-12 pt-20 pb-8 flex flex-wrap items-end gap-6">
-          {/* Avatar */}
-          <div className="relative shrink-0">
-            <div className="w-20 h-20 rounded-2xl flex items-center justify-center text-2xl font-extrabold text-white select-none"
-              style={{ background: "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)", boxShadow: "0 0 0 3px rgba(99,102,241,0.35), 0 8px 32px rgba(99,102,241,0.4)" }}>
-              {initial}
-            </div>
-            {hasSub(user) && (
-              <span className="absolute -bottom-2 -end-2 w-7 h-7 rounded-full flex items-center justify-center"
-                style={{ background: "linear-gradient(135deg, #6366f1, #a78bfa)", boxShadow: "0 0 0 2px #0a0a14" }}>
-                <Ic name="sparkles" size={13} className="text-white" />
-              </span>
-            )}
-          </div>
-          {/* Name + plan */}
-          <div className="min-w-0">
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-white leading-tight">{user.name || t("کاربر EasySub", "EasySub user")}</h1>
-            {user.email && <p className="mt-1 text-sm text-white/50" dir="ltr">{user.email}</p>}
-            <span className="mt-2 inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold text-white"
-              style={{ background: "rgba(99,102,241,0.25)", border: "1px solid rgba(99,102,241,0.45)" }}>
-              <Ic name="sparkles" size={11} />
-              {hasSub(user) ? t(fa(daysLeft(user)) + " روز اشتراک باقی‌مانده", daysLeft(user) + " days left") : t("بدون اشتراک فعال", "No active plan")}
-            </span>
-          </div>
-          {/* Stats */}
-          <div className="ms-auto flex gap-5 shrink-0">
-            {[[fa(lib.length), t("ویدیو", "Videos")], [fa(allNotes.length), t("یادداشت", "Notes")], [fa(cats.length), t("دسته", "Categories")]].map(([n, l]) => (
-              <div key={l} className="text-center">
-                <div className="text-xl font-extrabold text-white">{n}</div>
-                <div className="text-[11px] text-white/45 mt-0.5">{l}</div>
-              </div>
-            ))}
-          </div>
-        </div>
+    <div className="relative">
+      {/* Video background strip */}
+      <div className="absolute top-0 left-0 right-0 overflow-hidden pointer-events-none" style={{ height: 460 }}>
+        <ProfileBgVideo />
+        <div className="absolute inset-0 bg-black/40"></div>
+        <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-transparent to-[var(--color-base,#0b0b0c)]"></div>
+        <div className="absolute bottom-0 left-0 right-0 h-40 bg-gradient-to-t from-[var(--color-base,#0b0b0c)] to-transparent"></div>
       </div>
 
-      {/* Main */}
-      <div className="max-w-6xl mx-auto px-6 md:px-12 pb-20">
-        {/* Upload CTA */}
-        <button type="button" onClick={goStudio}
-          className="w-full rounded-2xl p-5 flex items-center gap-4 text-start transition-all mb-6 mt-2"
-          style={{ background: "linear-gradient(135deg, rgba(99,102,241,0.18) 0%, rgba(139,92,246,0.12) 100%)", border: "1px solid rgba(99,102,241,0.3)" }}>
-          <span className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0"
-            style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)" }}>
-            <Ic name="upload" size={20} className="text-white" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="font-extrabold text-white">{t("ساخت زیرنویس جدید", "Create new subtitles")}</div>
-            <p className="text-xs text-white/50 mt-0.5">{t("فایل آپلود کن یا لینک مستقیم بده", "Upload a file or paste a direct link")}</p>
+      <div className="relative pt-16">
+        <section className="max-w-7xl mx-auto px-6 md:px-12 py-12">
+
+          {/* Header card */}
+          <div className="liquid-glass-strong rounded-3xl p-7 flex flex-wrap items-center gap-6">
+            {/* Avatar */}
+            <div className="liquid-glass w-20 h-20 rounded-full text-white flex items-center justify-center text-2xl font-extrabold uppercase shrink-0">
+              {initial}
+            </div>
+            {/* Name / email / plan badge */}
+            <div className="min-w-0">
+              <h1 className="text-2xl font-extrabold text-white leading-tight">{user.name || t("کاربر EasySub", "EasySub user")}</h1>
+              {user.email && <p className="text-sm text-white/55 mt-0.5" dir="ltr">{user.email}</p>}
+              <div className="mt-2">
+                <span className="rounded-full bg-white text-black text-[11px] font-bold px-2.5 py-1 flex items-center gap-1 w-fit">
+                  <Ic name="sparkles" size={11} />
+                  {hasSub(user) ? t(fa(daysLeft(user)) + " روز باقی‌مانده", daysLeft(user) + " days left") : t("بدون اشتراک", "No plan")}
+                </span>
+              </div>
+            </div>
+            {/* Stats */}
+            <div className="ms-auto flex gap-6 shrink-0 flex-wrap">
+              {[[fa(lib.length), t("ویدیو ساخته‌شده", "Videos created")], [fa(allNotes.length), t("یادداشت", "Notes")], [fa(daysLeft(user)), t("روز باقی‌مانده", "Days left")]].map(([n, l]) => (
+                <div key={l} className="text-center">
+                  <div className="text-2xl font-extrabold text-white">{n}</div>
+                  <div className="text-[11px] text-white/50 mt-0.5">{l}</div>
+                </div>
+              ))}
+            </div>
           </div>
-          <Ic name={fwd()} size={18} className="text-white/40 shrink-0" />
-        </button>
 
-        {/* Tabs */}
-        <div className="flex gap-1 overflow-x-auto no-scrollbar pb-1 mb-6"
-          style={{ borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
-          {TABS.map((tb) => (
-            <button key={tb.id} type="button" onClick={() => setTab(tb.id)}
-              className={`shrink-0 flex items-center gap-2 px-4 h-11 text-sm whitespace-nowrap font-medium transition-all rounded-t-xl ${tab === tb.id
-                ? "text-white border-b-2"
-                : "text-white/50 hover:text-white/80"}`}
-              style={tab === tb.id ? { borderColor: "#6366f1" } : {}}>
-              <Ic name={tb.icon} size={15} /> {tb.label}
-            </button>
-          ))}
-        </div>
+          {/* Upload CTA */}
+          <button type="button" onClick={goStudio}
+            className="group mt-6 w-full liquid-glass-strong rounded-3xl p-6 sm:p-7 flex flex-wrap items-center gap-5 text-start hover:bg-white/5 transition-colors">
+            <span className="w-14 h-14 rounded-2xl bg-white text-black flex items-center justify-center shrink-0">
+              <Ic name="upload" size={24} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="font-extrabold text-white text-lg">{t("ساخت زیرنویس جدید", "Create new subtitles")}</div>
+              <p className="text-sm text-white/60 mt-1">{t("فایل آپلود کن یا لینک مستقیم بده", "Upload a file or paste a direct link")}</p>
+            </div>
+            <span className="ms-auto flex items-center gap-2 rounded-full bg-white text-black text-sm font-bold px-5 h-11 shrink-0 group-hover:bg-white/90 transition-colors">
+              <Ic name="upload" size={15} /> {t("شروع کن", "Get started")}
+            </span>
+          </button>
 
-        <AnimatePresence mode="wait">
-          <motion.div key={tab} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
+          {/* Tabs */}
+          <div className="mt-8 flex gap-2 flex-wrap">
+            {TABS.map((tb) => (
+              <button key={tb.id} type="button" onClick={() => setTab(tb.id)}
+                className={`shrink-0 flex items-center gap-2 rounded-full px-4 h-10 text-sm whitespace-nowrap transition-colors ${tab === tb.id ? "bg-white text-black font-bold" : "liquid-glass text-white/75 hover:text-white hover:bg-white/5"}`}>
+                <Ic name={tb.icon} size={14} /> {tb.label}
+              </button>
+            ))}
+          </div>
 
-            {/* ── My Videos tab ── */}
-            {tab === "library" && (
-              <div>
-                {/* Category filter pills */}
-                {cats.length > 0 && (
-                  <div className="flex gap-2 flex-wrap mb-5">
-                    <button type="button" onClick={() => setFilterCat(null)}
-                      className={`rounded-full px-3.5 h-8 text-xs font-medium transition-colors ${!filterCat ? "text-white" : "text-white/50 hover:text-white"}`}
-                      style={!filterCat ? { background: "rgba(99,102,241,0.35)", border: "1px solid rgba(99,102,241,0.5)" } : { border: "1px solid rgba(255,255,255,0.1)" }}>
-                      {t("همه", "All")}
-                    </button>
-                    {cats.map(c => (
-                      <button key={c.id} type="button" onClick={() => setFilterCat(c.id === filterCat ? null : c.id)}
-                        className={`rounded-full px-3.5 h-8 text-xs font-medium transition-colors ${filterCat === c.id ? "text-white" : "text-white/50 hover:text-white"}`}
-                        style={filterCat === c.id ? { background: "rgba(99,102,241,0.35)", border: "1px solid rgba(99,102,241,0.5)" } : { border: "1px solid rgba(255,255,255,0.1)" }}>
-                        {c.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {filteredLib.length ? (
-                  <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {filteredLib.map((v) => (
-                      <div key={v.id} className="relative group">
-                        <VideoCard v={v} onDelete={del} />
-                        {cats.length > 0 && (
-                          <div className="mt-1.5 ps-1">
-                            <select value={v.categoryId || ""} onChange={(e) => setItemCategory(v.id, e.target.value || null)}
-                              className="text-[11px] text-white/45 bg-transparent border-none outline-none cursor-pointer hover:text-white transition-colors">
-                              <option value="">{t("بدون دسته", "No category")}</option>
-                              {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                            </select>
+          <div className="mt-6">
+            <AnimatePresence mode="wait">
+              <motion.div key={tab} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
+
+                {/* ── Library tab ── */}
+                {tab === "library" && (
+                  <div>
+                    {cats.length > 0 && (
+                      <div className="flex gap-2 flex-wrap mb-5">
+                        <button type="button" onClick={() => setFilterCat(null)}
+                          className={`rounded-full px-3.5 h-8 text-xs font-medium transition-colors ${!filterCat ? "bg-white text-black font-bold" : "liquid-glass text-white/60 hover:text-white"}`}>
+                          {t("همه", "All")}
+                        </button>
+                        {cats.map(c => (
+                          <button key={c.id} type="button" onClick={() => setFilterCat(c.id === filterCat ? null : c.id)}
+                            className={`rounded-full px-3.5 h-8 text-xs font-medium transition-colors ${filterCat === c.id ? "bg-white text-black font-bold" : "liquid-glass text-white/60 hover:text-white"}`}>
+                            {c.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {filteredLib.length ? (
+                      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
+                        {filteredLib.map((v) => (
+                          <div key={v.id} className="relative">
+                            <VideoCard v={v} onDelete={del} />
+                            {cats.length > 0 && (
+                              <div className="mt-1.5 ps-1">
+                                <select value={v.categoryId || ""} onChange={(e) => setItemCategory(v.id, e.target.value || null)}
+                                  className="text-[11px] text-white/45 bg-transparent border-none outline-none cursor-pointer hover:text-white transition-colors">
+                                  <option value="">{t("بدون دسته", "No category")}</option>
+                                  {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                              </div>
+                            )}
                           </div>
-                        )}
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="liquid-glass-strong rounded-3xl p-10 text-center text-sm text-white/50">
+                        {filterCat ? t("در این دسته ویدیویی وجود ندارد.", "No videos in this category.") : t("هنوز ویدیویی نساخته‌ای.", "No videos yet.")}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── Categories tab ── */}
+                {tab === "categories" && (
+                  <div className="max-w-xl space-y-4">
+                    <p className="text-sm text-white/60 mb-4">{t("دسته‌بندی‌های شخصی برای سازمان‌دهی ویدیوهایت بساز.", "Create personal categories to organize your videos.")}</p>
+                    <form onSubmit={(e) => { e.preventDefault(); if (newCatName.trim()) { addCat(newCatName); setNewCatName(""); } }}
+                      className="flex gap-2">
+                      <input value={newCatName} onChange={(e) => setNewCatName(e.target.value)}
+                        placeholder={t("نام دستهٔ جدید…", "New category name…")}
+                        className="flex-1 liquid-glass rounded-full h-11 px-5 text-sm text-white placeholder:text-white/35" />
+                      <button type="submit" className="rounded-full bg-white text-black text-sm font-bold px-5 h-11 hover:bg-white/90 transition-colors">
+                        {t("افزودن", "Add")}
+                      </button>
+                    </form>
+                    {cats.length ? cats.map(c => (
+                      <div key={c.id} className="liquid-glass rounded-2xl flex items-center justify-between px-5 h-14">
+                        <span className="text-sm text-white font-medium">{c.name}</span>
+                        <span className="flex items-center gap-3">
+                          <span className="text-xs text-white/40">{fa(lib.filter(v => v.categoryId === c.id).length)} {t("ویدیو", "videos")}</span>
+                          <button type="button" onClick={() => removeCat(c.id)} className="text-white/30 hover:text-red-400 transition-colors">
+                            <Ic name="trash" size={14} />
+                          </button>
+                        </span>
+                      </div>
+                    )) : (
+                      <div className="liquid-glass rounded-2xl p-8 text-center text-sm text-white/40">
+                        {t("هنوز دسته‌ای نساخته‌ای.", "No categories yet.")}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── Downloads tab ── */}
+                {tab === "downloads" && (
+                  lib.length ? (
+                    <div className="space-y-3 max-w-3xl">
+                      {lib.map((v) => (
+                        <div key={v.id} className="liquid-glass rounded-2xl flex items-center gap-4 p-4">
+                          <span className="w-10 h-10 rounded-xl bg-white text-black flex items-center justify-center shrink-0">
+                            <Ic name="fileText" size={17} />
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-semibold truncate text-white">{vTitle(v)}</div>
+                            <div className="text-xs text-white/45 mt-0.5">{fa((v.cues||[]).length)} {t("زیرنویس", "cues")} · {libDate(v.createdAt)}</div>
+                          </div>
+                          <button type="button" onClick={() => dlFile(v.srt, "easysub.srt", "text/plain")}
+                            className="liquid-glass flex items-center gap-1.5 rounded-xl px-3 h-8 text-xs text-white/70 hover:text-white transition-colors shrink-0">
+                            <Ic name="download" size={12} /> .srt
+                          </button>
+                          <button type="button" onClick={() => dlFile(v.vtt, "easysub.vtt", "text/vtt")}
+                            className="liquid-glass flex items-center gap-1.5 rounded-xl px-3 h-8 text-xs text-white/70 hover:text-white transition-colors shrink-0">
+                            <Ic name="download" size={12} /> .vtt
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="liquid-glass-strong rounded-3xl p-10 text-center text-sm text-white/50">
+                      {t("هنوز زیرنویسی برای دانلود نداری.", "No subtitles to download yet.")}
+                    </div>
+                  )
+                )}
+
+                {/* ── Settings tab ── */}
+                {tab === "settings" && (
+                  <div className="max-w-lg space-y-5">
+                    {[[t("نام نمایشی", "Display name"), user.name || "", false, "name"], [t("ایمیل", "Email"), user.email || "", true, "email"]].map(([l, v, ltr, field]) => (
+                      <div key={field} className="space-y-2">
+                        <label className="text-sm font-medium text-white/80">{l}</label>
+                        <input defaultValue={v} dir={ltr ? "ltr" : undefined}
+                          style={ltr ? { textAlign: "left" } : undefined}
+                          onBlur={(e) => loginUser({ [field]: e.target.value })}
+                          className="liquid-glass w-full h-11 rounded-full px-5 text-sm text-white focus-visible:ring-2 focus-visible:ring-white/70" />
                       </div>
                     ))}
-                  </div>
-                ) : (
-                  <div className="rounded-2xl p-10 text-center text-sm text-white/40" style={{ border: "1px dashed rgba(255,255,255,0.1)" }}>
-                    {filterCat ? t("در این دسته ویدیویی وجود ندارد.", "No videos in this category.") : t("هنوز ویدیویی نساخته‌ای.", "No videos yet.")}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── Categories tab ── */}
-            {tab === "categories" && (
-              <div className="max-w-xl space-y-4">
-                <p className="text-sm text-white/50 mb-4">{t("دسته‌بندی‌های شخصی برای سازمان‌دهی ویدیوهایت بساز.", "Create personal categories to organize your videos.")}</p>
-                {/* Add new */}
-                <form onSubmit={(e) => { e.preventDefault(); if (newCatName.trim()) { addCat(newCatName); setNewCatName(""); } }}
-                  className="flex gap-2">
-                  <input value={newCatName} onChange={(e) => setNewCatName(e.target.value)}
-                    placeholder={t("نام دستهٔ جدید…", "New category name…")}
-                    className="flex-1 h-11 rounded-xl px-4 text-sm text-white placeholder:text-white/35"
-                    style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)" }} />
-                  <button type="submit"
-                    className="h-11 rounded-xl px-5 text-sm font-bold text-white transition-colors"
-                    style={{ background: "rgba(99,102,241,0.35)", border: "1px solid rgba(99,102,241,0.5)" }}>
-                    {t("افزودن", "Add")}
-                  </button>
-                </form>
-                {/* List */}
-                {cats.length ? cats.map(c => (
-                  <div key={c.id} className="flex items-center justify-between rounded-xl px-4 h-12"
-                    style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)" }}>
-                    <span className="text-sm text-white">{c.name}</span>
-                    <span className="flex items-center gap-3">
-                      <span className="text-xs text-white/35">{fa(lib.filter(v => v.categoryId === c.id).length)} {t("ویدیو", "videos")}</span>
-                      <button type="button" onClick={() => removeCat(c.id)} className="text-white/30 hover:text-red-400 transition-colors">
-                        <Ic name="trash" size={14} />
-                      </button>
-                    </span>
-                  </div>
-                )) : (
-                  <div className="rounded-xl p-8 text-center text-sm text-white/35" style={{ border: "1px dashed rgba(255,255,255,0.1)" }}>
-                    {t("هنوز دسته‌ای نساخته‌ای.", "No categories yet.")}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── Downloads tab ── */}
-            {tab === "downloads" && (
-              lib.length ? (
-                <div className="space-y-3 max-w-3xl">
-                  {lib.map((v) => (
-                    <div key={v.id} className="flex items-center gap-4 rounded-2xl p-4"
-                      style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)" }}>
-                      <span className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "rgba(99,102,241,0.2)" }}>
-                        <Ic name="fileText" size={17} style={{ color: "#a78bfa" }} />
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold truncate text-white">{vTitle(v)}</div>
-                        <div className="text-xs text-white/35 mt-0.5">{fa((v.cues||[]).length)} {t("زیرنویس", "cues")} · {libDate(v.createdAt)}</div>
+                    <div className="liquid-glass-strong rounded-3xl flex items-center justify-between p-6 gap-4 flex-wrap">
+                      <div>
+                        <div className="text-sm font-bold text-white">{t("اشتراک فعلی", "Current plan")}</div>
+                        <div className="text-xs text-white/55 mt-1">{hasSub(user) ? t(fa(daysLeft(user)) + " روز باقی‌مانده", daysLeft(user) + " days remaining") : t("بدون اشتراک", "No active plan")}</div>
                       </div>
-                      <button type="button" onClick={() => dlFile(v.srt, "easysub.srt", "text/plain")}
-                        className="flex items-center gap-1.5 rounded-xl px-3 h-8 text-xs text-white/70 hover:text-white transition-colors shrink-0"
-                        style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)" }}>
-                        <Ic name="download" size={12} /> .srt
-                      </button>
-                      <button type="button" onClick={() => dlFile(v.vtt, "easysub.vtt", "text/vtt")}
-                        className="flex items-center gap-1.5 rounded-xl px-3 h-8 text-xs text-white/70 hover:text-white transition-colors shrink-0"
-                        style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)" }}>
-                        <Ic name="download" size={12} /> .vtt
+                      <button type="button" onClick={goPricing}
+                        className="rounded-full bg-white text-black text-sm font-bold px-5 h-11 hover:bg-white/90 transition-colors">
+                        {t("تمدید / ارتقا", "Renew / Upgrade")}
                       </button>
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="rounded-xl p-8 text-center text-sm text-white/35" style={{ border: "1px dashed rgba(255,255,255,0.1)" }}>
-                  {t("هنوز زیرنویسی برای دانلود نداری.", "No subtitles to download yet.")}
-                </div>
-              )
-            )}
-
-            {/* ── Settings tab ── */}
-            {tab === "settings" && (
-              <div className="max-w-lg space-y-5">
-                {[[t("نام نمایشی", "Display name"), user.name || "", false, "name"], [t("ایمیل", "Email"), user.email || "", true, "email"]].map(([l, v, ltr, field]) => (
-                  <div key={field} className="space-y-2">
-                    <label className="text-sm font-medium text-white/80">{l}</label>
-                    <input defaultValue={v} dir={ltr ? "ltr" : undefined} style={ltr ? { textAlign: "left", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)" } : { background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)" }}
-                      onBlur={(e) => loginUser({ [field]: e.target.value })}
-                      className="w-full h-11 rounded-xl px-4 text-sm text-white focus-visible:ring-2 focus-visible:ring-indigo-500/70" />
+                    <button type="button" onClick={() => { logoutUser(); navigate("/login"); }}
+                      className="liquid-glass flex items-center gap-2 rounded-full px-5 h-11 text-sm text-red-300 hover:text-red-200 transition-colors">
+                      <Ic name="logout" size={15} /> {t("خروج از حساب", "Log out")}
+                    </button>
                   </div>
-                ))}
-                <div className="flex items-center justify-between rounded-2xl p-5" style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.25)" }}>
-                  <div>
-                    <div className="text-sm font-semibold text-white">{t("اشتراک فعلی", "Current plan")}</div>
-                    <div className="text-xs text-white/50 mt-1">{hasSub(user) ? t(fa(daysLeft(user)) + " روز باقی‌مانده", daysLeft(user) + " days remaining") : t("بدون اشتراک", "No active plan")}</div>
-                  </div>
-                  <button type="button" onClick={goPricing}
-                    className="rounded-xl px-4 h-9 text-sm font-bold text-white transition-colors"
-                    style={{ background: "rgba(99,102,241,0.4)", border: "1px solid rgba(99,102,241,0.55)" }}>
-                    {t("تمدید / ارتقا", "Renew / Upgrade")}
-                  </button>
-                </div>
-                <button type="button" onClick={() => { logoutUser(); navigate("/login"); }}
-                  className="flex items-center gap-2 rounded-xl px-5 h-11 text-sm text-red-300 hover:text-red-200 transition-colors"
-                  style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
-                  <Ic name="logout" size={15} /> {t("خروج از حساب", "Log out")}
-                </button>
-              </div>
-            )}
+                )}
 
-          </motion.div>
-        </AnimatePresence>
+              </motion.div>
+            </AnimatePresence>
+          </div>
+
+        </section>
       </div>
     </div>
   );
