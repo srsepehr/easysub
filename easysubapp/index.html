@@ -2401,8 +2401,26 @@ function StudioInner() {
     rd.readAsDataURL(f);
   });
 
-  // Real pipeline: stream the serverless function's NDJSON progress so the bar
-  // reflects exact progress, then store the Persian subtitles and navigate.
+  // Smooth, believable progress bar. It eases toward 92% while the request is in
+  // flight (the work happens server-side in one call) and snaps to 100% on success.
+  const progRef = React.useRef(null);
+  const startProgress = () => {
+    stopProgress();
+    let p = 0;
+    setPct(0); setStageKey("download");
+    progRef.current = setInterval(() => {
+      p += Math.max(0.5, (92 - p) * 0.035);
+      if (p > 92) p = 92;
+      setPct(p);
+      const sk = p < 14 ? "download" : p < 42 ? "transcribe" : p < 86 ? "translate" : "build";
+      setStageKey(sk);
+    }, 200);
+  };
+  const stopProgress = () => { if (progRef.current) { clearInterval(progRef.current); progRef.current = null; } };
+  React.useEffect(() => () => stopProgress(), []);
+
+  // Real pipeline: one JSON request to the serverless function. The API returns
+  // Persian error messages, which we surface as-is.
   const runPipeline = async () => {
     try {
       let body;
@@ -2415,33 +2433,10 @@ function StudioInner() {
         const b64 = await readBase64(file);
         body = { mediaBase64: b64, mimeType: file.type || "video/mp4" };
       }
+      startProgress();
       const r = await fetch("/api/subtitle", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      if (!r.body) {
-        const data = await r.json().catch(() => null);
-        throw new Error((data && data.error) || ("خطای سرور HTTP " + r.status));
-      }
-
-      // Read the NDJSON stream line-by-line.
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "", result = null, errMsg = null;
-      while (true) {
-        const { done: rdone, value } = await reader.read();
-        if (value) buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let msg; try { msg = JSON.parse(line); } catch (e) { continue; }
-          if (msg.type === "progress") { setPct(msg.pct); if (msg.stage) setStageKey(msg.stage); }
-          else if (msg.type === "result") { result = msg; }
-          else if (msg.type === "error") { errMsg = msg.error; }
-        }
-        if (rdone) break;
-      }
-      if (errMsg) throw new Error(errMsg);
-      if (!result) throw new Error(t("پاسخی از سرور دریافت نشد. دوباره امتحان کن.", "No response from the server. Please try again."));
+      const data = await r.json().catch(() => null);
+      if (!r.ok || !data) throw new Error((data && data.error) || ("خطای سرور (HTTP " + r.status + ")"));
 
       const url = mode === "link" ? link.trim() : "";
       const yid = mode === "link" ? ytId(url) : null;
@@ -2456,17 +2451,18 @@ function StudioInner() {
         mediaUrl: kind === "youtube" ? "" : (mode === "link" ? url : URL.createObjectURL(file)),
         mimeType: mode === "link" ? "" : (file.type || "video/mp4"),
         thumb: yid ? ytThumb(yid) : "",
-        cues: result.cues || [], srt: result.srt || "", vtt: result.vtt || "",
-        durationSec: (result.cues && result.cues.length) ? Math.ceil(result.cues[result.cues.length - 1].end) : 0,
+        cues: data.cues || [], srt: data.srt || "", vtt: data.vtt || "",
+        durationSec: (data.cues && data.cues.length) ? Math.ceil(data.cues[data.cues.length - 1].end) : 0,
         createdAt: Date.now(),
       };
-      setPct(100);
+      stopProgress();
+      setStageKey("build"); setPct(100);
       saveToLibrary(item);
       window.__EASYSUB_RESULT = item;
       newIdRef.current = item.id;
       setDone(true);
     } catch (e) {
-      // The API already returns Persian error messages — show them as-is
+      stopProgress();
       const msg = String((e && e.message) || e);
       setError(msg || t("خطای ناشناخته‌ای رخ داد.", "An unknown error occurred."));
       setStage("input"); setPct(0); setDone(false);
