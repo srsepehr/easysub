@@ -1,7 +1,0 @@
-{
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "cleanUrls": true,
-  "functions": {
-    "api/subtitle.js": { "maxDuration": 60 }
-  }
-}
