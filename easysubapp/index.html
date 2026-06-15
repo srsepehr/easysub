@@ -45,6 +45,7 @@
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://accounts.google.com/gsi/client" async></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
   html { background: #0B0B0C; }
   body { margin: 0; background: #0B0B0C; color: #FAFAFA; font-family: "Vazirmatn", sans-serif; }
@@ -324,6 +325,43 @@ const ytId = (url) => {
 const isYouTube = (url) => !!ytId(url);
 const ytThumb = (id) => "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg";
 
+/* ---------- Supabase config (free backend) ----------
+   1. Create a free project at https://supabase.com
+   2. Go to Settings → API and copy the Project URL + anon/public key
+   3. Paste them below — the anon key is safe to include in client-side code.
+   4. In Supabase Dashboard → Authentication → Providers → enable Google OAuth.
+   5. In your Supabase SQL editor run:
+      CREATE TABLE IF NOT EXISTS library_items (
+        id TEXT PRIMARY KEY, user_email TEXT NOT NULL, data JSONB, created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS categories (
+        id TEXT PRIMARY KEY, user_email TEXT NOT NULL, name TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      ALTER TABLE library_items ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
+      CREATE POLICY "own items" ON library_items FOR ALL USING (auth.jwt() ->> 'email' = user_email);
+      CREATE POLICY "own categories" ON categories FOR ALL USING (auth.jwt() ->> 'email' = user_email);
+*/
+const SUPABASE_URL = "";       // e.g. "https://xyzxyz.supabase.co"
+const SUPABASE_ANON_KEY = "";  // your public anon key
+
+// Initialize Supabase client when URL is configured
+const _sb = (SUPABASE_URL && SUPABASE_ANON_KEY && window.supabase)
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+// Helper: redirect to intended destination after login/signup
+const getAfterLogin = () => { try { return sessionStorage.getItem("easysub_after_login") || "/profile"; } catch(e) { return "/profile"; } };
+const setAfterLogin = (path) => { try { sessionStorage.setItem("easysub_after_login", path); } catch(e) {} };
+const clearAfterLogin = () => { try { sessionStorage.removeItem("easysub_after_login"); } catch(e) {} };
+
+// Navigate to studio — checks login first, redirects to login if needed
+const goStudio = () => {
+  if (isLoggedIn()) { navigate("/studio"); return; }
+  setAfterLogin("/studio");
+  navigate("/login");
+};
+
 /* ---------- Google Sign-In ----------
    Paste your Google OAuth Client ID below to enable real Google login.
    Get one free at: https://console.cloud.google.com/apis/credentials
@@ -337,10 +375,9 @@ const handleGoogleCredential = (resp) => {
   const p = decodeJwt(resp && resp.credential);
   if (!p || !p.email) return;
   const email = String(p.email).toLowerCase();
-  // create a passwordless account on first Google login (0 days unless admin)
   if (!getAccounts()[email]) createAccount(email, "google-oauth-" + simpleHash(email), p.name || email.split("@")[0]);
   loginUser({ name: p.name || email.split("@")[0], email });
-  navigate("/profile");
+  const dest = getAfterLogin(); clearAfterLogin(); navigate(dest);
 };
 
 /* ---------- Digits: Persian in FA, western in EN ---------- */
@@ -702,7 +739,7 @@ function VideoCard({ v, onOpen, onDelete }) {
       <button type="button" onClick={() => (onOpen ? onOpen(v) : navigate("/watch/" + v.id))} className="block w-full text-start">
         <div className="relative aspect-video overflow-hidden rounded-[0.85rem] bg-neutral-900">
           {img
-            ? <img src={img} alt="" loading="lazy" className="w-full h-full object-cover group-hover:scale-[1.05] transition-transform duration-700 ease-out" />
+            ? <img src={img} alt="" loading="lazy" className="w-full h-full object-cover transition-transform duration-700 ease-out" />
             : <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-white/10 to-transparent text-white/40"><Ic name="film" size={30} /></div>}
           <div className="absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-transparent"></div>
           <div className="touch-play-hint absolute inset-0 flex items-center justify-center transition-opacity duration-300">
@@ -867,20 +904,19 @@ Object.assign(window, {
 /* global React, motion, AnimatePresence, Ic, fa, t, setLang, fwd, navigate, CATEGORIES, catName, Btn, HoverBorderGradient, getUser, daysLeft */
 
 const navLinks = () => [
-  { label: t("استودیو", "Studio"), to: "/studio" },
-  { label: t("کتابخانهٔ من", "My Library"), to: "/categories" },
-  { label: t("دمو", "Demo"), to: "/demo" },
-  { label: t("قیمت‌گذاری", "Pricing"), to: "/#pricing" },
+  { label: t("آپلود ویدیو", "Upload Video"), to: "__studio__" },
+  { label: t("دسته‌بندی‌ها", "Categories"), to: "/categories" },
+  { label: t("کتابخانهٔ من", "My Library"), to: "/profile" },
 ];
 
 /* EN/FA segmented toggle — same spot in the header on every page */
 function LangToggle({ className = "" }) {
   const lang = window.__LANG;
   return (
-    <div className={`liquid-glass rounded-full p-1 flex items-center shrink-0 ${className}`} dir="ltr">
+    <div className={`liquid-glass rounded-full p-0.5 flex items-center shrink-0 ${className}`} dir="ltr">
       {[["fa", "فا"], ["en", "EN"]].map(([l, label]) => (
         <button key={l} type="button" onClick={() => setLang(l)} aria-label={l === "fa" ? "فارسی" : "English"}
-          className={`rounded-full px-3 min-h-[44px] min-w-[44px] text-[11px] font-bold transition-colors ${lang === l ? "bg-white text-black" : "text-white/60 hover:text-white"}`}>
+          className={`rounded-full px-2.5 h-8 text-[11px] font-bold transition-colors ${lang === l ? "bg-white text-black" : "text-white/60 hover:text-white"}`}>
           {label}
         </button>
       ))}
@@ -911,6 +947,7 @@ function Header({ transparentTop = false, showLang = false }) {
   const solid = scrolled || !transparentTop || open || searchOpen;
   const go = (to) => {
     setOpen(false);
+    if (to === "__studio__") { goStudio(); return; }
     if (to === "/#pricing") {
       navigate("/");
       setTimeout(() => {
@@ -979,22 +1016,28 @@ function Header({ transparentTop = false, showLang = false }) {
           {/* Language toggle — only rendered on the home page */}
           {showLang && <LangToggle />}
           {user ? (
-            hasSub(user) ? (
+            <div className="hidden md:flex items-center gap-2 shrink-0">
               <button type="button" onClick={() => navigate("/profile")}
-                className="liquid-glass flex items-center gap-1.5 rounded-full px-3 h-9 text-xs text-white whitespace-nowrap hover:bg-white/10 transition-colors shrink-0 max-w-[160px] sm:max-w-none overflow-hidden">
+                className="liquid-glass flex items-center gap-1.5 rounded-full px-3 h-9 text-xs text-white whitespace-nowrap hover:bg-white/10 transition-colors overflow-hidden max-w-[150px]">
                 <Ic name="sparkles" size={13} className="shrink-0" />
-                <span className="truncate">{t(fa(daysLeft(user)) + " روز اشتراک", daysLeft(user) + " days left")}</span>
+                <span className="truncate">{t(fa(daysLeft(user)) + " روز", daysLeft(user) + " days")}</span>
               </button>
-            ) : (
               <button type="button" onClick={goPricing}
-                className="bg-white text-black font-bold flex items-center gap-1.5 rounded-full px-4 h-9 text-xs whitespace-nowrap hover:bg-white/90 transition-colors shrink-0">
-                <Ic name="sparkles" size={13} className="shrink-0" /> {t("ارتقا به اشتراک", "Upgrade")}
+                className="bg-white text-black font-bold flex items-center gap-1.5 rounded-full px-3.5 h-9 text-xs whitespace-nowrap hover:bg-white/90 transition-colors shrink-0">
+                {t("تمدید", "Renew")}
               </button>
-            )
+            </div>
           ) : (
-            <HoverBorderGradient onClick={() => navigate("/login")} containerClassName="hidden md:flex shrink-0" className="px-5 py-2 text-sm whitespace-nowrap">
-              {t("ورود / ثبت‌نام", "Log in / Sign up")} <Ic name={fwd()} size={15} />
-            </HoverBorderGradient>
+            <div className="hidden md:flex items-center gap-2 shrink-0">
+              <button type="button" onClick={() => navigate("/login")}
+                className="liquid-glass rounded-full px-4 h-9 text-xs text-white whitespace-nowrap hover:bg-white/10 transition-colors">
+                {t("ورود", "Log in")}
+              </button>
+              <button type="button" onClick={() => navigate("/signup")}
+                className="bg-white text-black font-bold rounded-full px-4 h-9 text-xs whitespace-nowrap hover:bg-white/90 transition-colors">
+                {t("ثبت‌نام", "Sign up")}
+              </button>
+            </div>
           )}
           {/* Hamburger */}
           <button type="button" onClick={() => setOpen(!open)} aria-label={t("منو", "Menu")}
@@ -1151,56 +1194,52 @@ const SPOT_REVEAL = "https://images.higgs.ai/?default=1&output=webp&url=https%3A
 
 /* ---- Section 1: full-screen liquid-glass hero ---- */
 function Hero() {
-  const [link, setLink] = React.useState("");
-  const go = () => navigate("/studio");
+  const [q, setQ] = React.useState("");
+  const search = () => { navigate("/categories"); };
   return (
     <section className="relative overflow-hidden bg-black flex flex-col" style={{ minHeight: "78vh" }}>
-      {/* backdrop fallback + video */}
       <img src={bgAsset("bg-hero")} alt="" className="absolute inset-0 w-full h-full object-cover" />
       <EsFadingVideo src={HERO_VIDEO} poster={bgAsset("bg-hero")} endOffset={2}
         className="absolute bottom-0 left-0 w-full h-[117%] object-cover object-bottom" />
 
-      {/* content */}
       <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-6 py-10 text-center -translate-y-[4%]">
         <motion.h1 initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, ease: "easeOut", delay: 0.15 }}
           className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl text-white font-extrabold tracking-tight leading-[1.18]">
-          {t("هر ویدیویی، به زبان تو", "Any video, in your language")}
+          {t("زیرنویس فارسی، برای هر ویدیو", "Persian subtitles for every video")}
         </motion.h1>
 
         <motion.p initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, ease: "easeOut", delay: 0.28 }}
-          className="mt-3 text-sm sm:text-base leading-7 max-w-[42ch]"
+          className="mt-3 text-sm sm:text-base leading-7 max-w-[40ch]"
           style={{ color: "rgba(255,255,255,0.9)", textShadow: "0 1px 14px rgba(0,0,0,0.8)" }}>
-          {t("زیرنویس فارسی هوشمند برای هر دوره، مستند و ویدیو — یادداشت بردار و دانلود کن.",
-            "Smart Persian subtitles for any course, documentary or video — take notes and download.")}
+          {t("آپلود کن، هوش مصنوعی ترجمه کنه، تماشا کن.", "Upload. AI translates. You watch.")}
         </motion.p>
 
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, ease: "easeOut", delay: 0.38 }}
           className="mt-7 w-full max-w-md">
-          {/* glass capsule */}
-          <div className="liquid-glass rounded-full ps-5 pe-2 py-2 flex items-center gap-3">
-            <input value={link} onChange={(e) => setLink(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && go()}
-              placeholder={t("لینک ویدیو را وارد کنید…", "Paste a video link…")}
+          <form onSubmit={(e) => { e.preventDefault(); search(); }} className="liquid-glass rounded-full ps-5 pe-2 py-2 flex items-center gap-3">
+            <Ic name="search" size={16} className="text-white/40 shrink-0" />
+            <input value={q} onChange={(e) => setQ(e.target.value)}
+              placeholder={t("جستجو در ویدیوها…", "Search videos…")}
               className="flex-1 bg-transparent text-white placeholder:text-white/45 text-sm focus-visible:ring-2 focus-visible:ring-white/70 min-w-0" />
-            <button type="button" onClick={go} aria-label={t("ساخت زیرنویس", "Generate subtitles")}
+            <button type="submit" aria-label={t("جستجو", "Search")}
               className="bg-white rounded-full p-2.5 text-black shrink-0 active:scale-95 transition-transform">
               <Ic name={fwd()} size={18} />
             </button>
-          </div>
+          </form>
         </motion.div>
 
-      </div>
-
-      {/* social icons */}
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.8, delay: 0.6 }}
-        className="relative z-10 flex justify-center gap-3 pb-8">
-        {[["instagram", t("اینستاگرام", "Instagram")], ["send", t("تلگرام", "Telegram")], ["globe", t("وب‌سایت", "Website")]].map(([icon, label]) => (
-          <button key={icon} type="button" aria-label={label}
-            className="liquid-glass rounded-full p-3 text-white/75 hover:text-white hover:bg-white/5 transition-all">
-            <Ic name={icon} size={18} />
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, ease: "easeOut", delay: 0.52 }}
+          className="mt-5 flex items-center gap-3">
+          <button type="button" onClick={goStudio}
+            className="bg-white text-black font-bold rounded-full px-6 h-11 text-sm hover:bg-white/90 active:scale-95 transition-all">
+            {t("ساخت زیرنویس", "Create subtitles")}
           </button>
-        ))}
-      </motion.div>
+          <button type="button" onClick={() => navigate("/categories")}
+            className="liquid-glass rounded-full px-5 h-11 text-sm text-white hover:bg-white/10 transition-all">
+            {t("مرور ویدیوها", "Browse videos")}
+          </button>
+        </motion.div>
+      </div>
     </section>
   );
 }
@@ -1400,8 +1439,8 @@ function SpotlightSection() {
           ))}
         </Stagger>
         <Reveal delay={0.3} className="max-w-6xl mx-auto mt-8 flex justify-center sm:justify-start">
-          <HoverBorderGradient onClick={() => navigate("/studio")} className="px-7 py-3">
-            {t("همین حالا شروع کن", "Start now")}
+          <HoverBorderGradient onClick={goStudio} className="px-7 py-3">
+            {t("ساخت زیرنویس", "Create subtitles")}
           </HoverBorderGradient>
         </Reveal>
       </div>
@@ -1447,8 +1486,8 @@ function HowItWorks() {
       </div>
       <Reveal delay={0.3}>
         <div className="mt-10 flex justify-center">
-          <HoverBorderGradient onClick={() => navigate("/studio")} className="px-7 py-2.5">
-            <Ic name="sparkles" size={15} /> {t("شروع رایگان در استودیو", "Start free in Studio")}
+          <HoverBorderGradient onClick={goStudio} className="px-7 py-2.5">
+            <Ic name="sparkles" size={15} /> {t("ساخت زیرنویس", "Create subtitles")}
           </HoverBorderGradient>
         </div>
       </Reveal>
@@ -1469,9 +1508,6 @@ function HomePage() {
 
       {/* ---------- Pricing for non-subscribers, premium features for subscribers ---------- */}
       <HomePricingOrFeatures />
-
-      {/* ---------- Your Library (real, processed videos) ---------- */}
-      <HomeLibrary />
     </div>
   );
 }
@@ -2209,7 +2245,7 @@ function StudioInner() {
       }
       const r = await fetch("/api/subtitle", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const data = await r.json();
-      if (!r.ok) throw new Error((data && data.code) || (data && data.error) || ("HTTP " + r.status));
+      if (!r.ok) throw new Error((data && data.error) || ("خطای سرور HTTP " + r.status));
       const url = mode === "link" ? link.trim() : "";
       const yid = mode === "link" ? ytId(url) : null;
       const kind = yid ? "youtube" : (mode === "link" ? "url" : "file");
@@ -2232,12 +2268,9 @@ function StudioInner() {
       newIdRef.current = item.id;
       setDone(true);
     } catch (e) {
+      // The API already returns Persian error messages — show them as-is
       const msg = String((e && e.message) || e);
-      let userMsg = msg;
-      if (msg.includes("NO_KEY")) userMsg = t("کلید API تنظیم نشده است.", "API key not configured. Add a free Gemini key in Vercel settings.");
-      else if (msg.includes("NOT_MEDIA")) userMsg = t("این لینک یک فایل ویدیو مستقیم نیست.", "That link isn't a direct media file. Paste a direct .mp4 or .mp3 link.");
-      else if (msg.includes("NO_SPEECH")) userMsg = t("گفتاری شناسایی نشد.", "No speech was detected in this media.");
-      setError(userMsg);
+      setError(msg || t("خطای ناشناخته‌ای رخ داد.", "An unknown error occurred."));
       setStage("input"); setStep(0); setDone(false);
     }
   };
@@ -2269,23 +2302,9 @@ function StudioInner() {
       {/* content — shifted up, compact; pointer-events pass through to the scene except on controls */}
       <section className="relative z-10 w-full max-w-lg mx-auto px-6 flex-1 flex flex-col justify-start pt-28 sm:pt-32 pb-16 pointer-events-none">
         <div className="text-center opacity-0 animate-fade-up" style={{ animationDelay: "0.1s" }}>
-          <span className="liquid-glass inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11px] font-semibold text-white whitespace-nowrap">
-            <Ic name="sparkles" size={12} /> {t("استودیو زیرنویس", "Subtitle Studio")}
-          </span>
-          <h1 className="mt-4 text-2xl sm:text-3xl md:text-4xl font-extrabold tracking-tight text-white" style={{ textShadow: "0 2px 24px rgba(0,0,0,0.8)" }}>
-            {t("هر ویدیویی را فارسی کن", "Make any video Persian")}
+          <h1 className="text-2xl sm:text-3xl md:text-4xl font-extrabold tracking-tight text-white" style={{ textShadow: "0 2px 24px rgba(0,0,0,0.8)" }}>
+            {t("زیرنویس فارسی بساز", "Generate Persian subtitles")}
           </h1>
-          <p className="mt-2 text-white/75 leading-7 text-sm" style={{ textShadow: "0 1px 12px rgba(0,0,0,0.8)" }}>
-            {t("لینک بده یا فایل آپلود کن — همین.", "Paste a link or upload a file — that's it.")}
-          </p>
-          {/* AI capabilities — ATO-style skill chips */}
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 pointer-events-none">
-            {[["sparkles", t("ترجمهٔ هوشمند", "Smart translation")], ["check", t("زمان‌بندی خودکار", "Auto timing")], ["fileText", t("خروجی SRT", "SRT export")]].map(([ic, label]) => (
-              <span key={label} className="liquid-glass inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium text-white/85 whitespace-nowrap">
-                <Ic name={ic} size={11} /> {label}
-              </span>
-            ))}
-          </div>
         </div>
 
         <AnimatePresence mode="wait">
@@ -2316,7 +2335,7 @@ function StudioInner() {
                   </button>
                 </div>
                 <p className="mt-2.5 text-center text-[11px] text-white/55" style={{ textShadow: "0 1px 10px rgba(0,0,0,0.8)" }}>
-                  {link.trim() && isYouTube(link) ? t("لینک یوتیوب شناسایی شد ✓", "YouTube link detected ✓") : t("یوتیوب پشتیبانی می‌شود — یا یک لینک مستقیم .mp4/.mp3 بده.", "YouTube is supported — or paste a direct .mp4/.mp3 link.")}
+                  {t("یک لینک مستقیم .mp4/.mp3/.wav وارد کن", "Paste a direct .mp4/.mp3/.wav link")}
                 </p>
                 </div>
               ) : (
@@ -2438,7 +2457,17 @@ function GoogleSignInButton() {
   if (GOOGLE_CLIENT_ID) {
     return <div className="flex justify-center"><div ref={ref}></div>{!ready && <span className="text-xs text-white/40">{t("در حال بارگذاری گوگل…", "Loading Google…")}</span>}</div>;
   }
-  // Fallback when no Client ID is set yet
+  // Supabase Google OAuth fallback (works without GOOGLE_CLIENT_ID)
+  if (_sb) {
+    const handleSupabaseGoogle = () => _sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin + window.location.pathname } });
+    return (
+      <button type="button" onClick={handleSupabaseGoogle}
+        className="liquid-glass w-full flex items-center justify-center gap-2.5 h-12 rounded-full hover:bg-white/5 transition-colors text-sm text-white">
+        <Ic name="chrome" size={17} /> {t("ادامه با گوگل", "Continue with Google")}
+      </button>
+    );
+  }
+  // No auth configured — fallback
   return (
     <button type="button" onClick={() => navigate("/signup")}
       className="liquid-glass w-full flex items-center justify-center gap-2.5 h-12 rounded-full hover:bg-white/5 transition-colors text-sm text-white">
@@ -2514,19 +2543,30 @@ function SignupPage() {
   const [pass, setPass] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
   const [err, setErr] = React.useState("");
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     if (pending) return;
     setErr("");
-    if (!first.trim() || !email.trim() || !pass || !confirm) { setErr(t("لطفاً همهٔ فیلدهای ستاره‌دار را پر کنید.", "Please fill in all required fields.")); return; }
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) { setErr(t("ایمیل معتبر نیست.", "Please enter a valid email.")); return; }
+    if (!first.trim()) { setErr(t("لطفاً نام خود را وارد کنید.", "Please enter your first name.")); return; }
+    if (!email.trim()) { setErr(t("لطفاً ایمیل را وارد کنید.", "Please enter your email.")); return; }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) { setErr(t("ایمیل معتبر نیست.", "Please enter a valid email address.")); return; }
+    if (!pass) { setErr(t("لطفاً رمز عبور را وارد کنید.", "Please enter a password.")); return; }
     if (pass.length < 8) { setErr(t("رمز عبور باید حداقل ۸ کاراکتر باشد.", "Password must be at least 8 characters.")); return; }
+    if (!confirm) { setErr(t("لطفاً رمز عبور را تکرار کنید.", "Please confirm your password.")); return; }
     if (pass !== confirm) { setErr(t("رمز عبور و تکرار آن یکسان نیستند.", "Passwords do not match.")); return; }
     setPending(true);
     const name = (first.trim() + " " + last.trim()).trim();
+    // Try Supabase when configured
+    if (_sb) {
+      const { data, error } = await _sb.auth.signUp({ email: email.trim(), password: pass, options: { data: { name } } });
+      if (error) { setErr(error.message); setPending(false); return; }
+      loginUser({ name, email: email.trim() });
+      const dest = getAfterLogin(); clearAfterLogin(); navigate(dest); return;
+    }
+    // localStorage fallback
     const res = createAccount(email.trim(), pass, name);
     if (res.error) { setErr(res.error); setPending(false); return; }
-    setTimeout(() => { loginUser({ name, email: email.trim() }); navigate("/profile"); }, 400);
+    setTimeout(() => { loginUser({ name, email: email.trim() }); const dest = getAfterLogin(); clearAfterLogin(); navigate(dest); }, 400);
   };
   return (
     <main className="flex min-h-screen w-full bg-black selection:bg-white/30 p-2 transition-all duration-500 lg:h-screen lg:overflow-hidden lg:p-4">
@@ -2571,15 +2611,26 @@ function LoginPage() {
   const [email, setEmail] = React.useState("");
   const [pass, setPass] = React.useState("");
   const [err, setErr] = React.useState("");
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     if (pending) return;
     setErr("");
-    if (!email.trim() || !pass) { setErr(t("لطفاً ایمیل و رمز عبور را وارد کنید.", "Please enter your email and password.")); return; }
+    if (!email.trim()) { setErr(t("لطفاً ایمیل را وارد کنید.", "Please enter your email.")); return; }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) { setErr(t("ایمیل معتبر نیست.", "Please enter a valid email address.")); return; }
+    if (!pass) { setErr(t("لطفاً رمز عبور را وارد کنید.", "Please enter your password.")); return; }
     setPending(true);
+    // Try Supabase when configured
+    if (_sb) {
+      const { data, error } = await _sb.auth.signInWithPassword({ email: email.trim(), password: pass });
+      if (error) { setErr(error.message); setPending(false); return; }
+      const u = data.user;
+      loginUser({ email: u.email, name: u.user_metadata?.name || u.email.split("@")[0] });
+      const dest = getAfterLogin(); clearAfterLogin(); navigate(dest); return;
+    }
+    // localStorage fallback
     const res = verifyLogin(email.trim(), pass);
     if (res.error) { setErr(res.error); setPending(false); return; }
-    setTimeout(() => { loginUser({ email: email.trim() }); navigate("/profile"); }, 350);
+    setTimeout(() => { loginUser({ email: email.trim() }); const dest = getAfterLogin(); clearAfterLogin(); navigate(dest); }, 350);
   };
   return (
     <main className="relative min-h-screen w-full bg-black overflow-hidden flex selection:bg-white/30">
@@ -2736,6 +2787,30 @@ Object.assign(window, { SignupPage, LoginPage, ForgotPasswordPage, StepItem, Soc
 
 const PROFILE_BG_VIDEO = "https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260328_105406_16f4600d-7a92-4292-b96e-b19156c7830a.mp4";
 
+/* ---- Library categories (localStorage) ---- */
+const CATS_KEY = "easysub_lib_categories";
+const getLibCats = () => { try { return JSON.parse(localStorage.getItem(CATS_KEY) || "[]"); } catch(e) { return []; } };
+const saveLibCats = (cats) => { try { localStorage.setItem(CATS_KEY, JSON.stringify(cats)); } catch(e) {} };
+const useLibCats = () => {
+  const [cats, setCats] = React.useState(getLibCats);
+  React.useEffect(() => {
+    const onCat = () => setCats(getLibCats());
+    window.addEventListener("easysub:cats", onCat);
+    return () => window.removeEventListener("easysub:cats", onCat);
+  }, []);
+  const refresh = () => { setCats(getLibCats()); window.dispatchEvent(new Event("easysub:cats")); };
+  const add = (name) => { const c = { id: "cat_" + Date.now().toString(36), name: name.trim(), createdAt: Date.now() }; saveLibCats([...getLibCats(), c]); refresh(); return c.id; };
+  const remove = (id) => { saveLibCats(getLibCats().filter(c => c.id !== id)); refresh(); };
+  return { cats, add, remove };
+};
+const setItemCategory = (itemId, catId) => {
+  const lib = getLibrary();
+  const idx = lib.findIndex(v => v.id === itemId);
+  if (idx < 0) return;
+  lib[idx].categoryId = catId || null;
+  try { localStorage.setItem("easysub_library", JSON.stringify(lib)); window.dispatchEvent(new Event("easysub:library")); } catch(e) {}
+};
+
 function ProfileBgVideo() {
   const ref = React.useRef(null);
   React.useEffect(() => {
@@ -2749,177 +2824,268 @@ function ProfileBgVideo() {
   return <video ref={ref} src={PROFILE_BG_VIDEO} autoPlay={!window.matchMedia("(prefers-reduced-motion: reduce)").matches} loop muted playsInline preload="auto" className="w-full h-full object-cover"></video>;
 }
 
-const profileTabs = () => [
-  { id: "library", label: t("ویدیوهای من", "My videos"), icon: "play" },
-  { id: "notes", label: t("یادداشت‌های من", "My notes"), icon: "fileText" },
-  { id: "downloads", label: t("دانلودها", "Downloads"), icon: "download" },
-  { id: "settings", label: t("تنظیمات حساب", "Account settings"), icon: "settings" },
-];
-
 function ProfilePage() {
   const user = useUser() || {};
   const lib = useLibrary();
+  const { cats, add: addCat, remove: removeCat } = useLibCats();
   const [tab, setTab] = React.useState("library");
-  const TABS = profileTabs();
+  const [filterCat, setFilterCat] = React.useState(null);
+  const [newCatName, setNewCatName] = React.useState("");
+  const [catPickFor, setCatPickFor] = React.useState(null); // item id being re-categorized
 
-  /* real saved notes across the whole library */
   const allNotes = [];
   lib.forEach((v) => {
-    try { JSON.parse(localStorage.getItem("easysub_notes_" + v.id) || "[]").forEach((n) => allNotes.push({ ...n, video: v })); } catch (e) {}
+    try { JSON.parse(localStorage.getItem("easysub_notes_" + v.id) || "[]").forEach((n) => allNotes.push({ ...n, video: v })); } catch(e) {}
   });
   allNotes.sort((a, b) => (b.id || 0) - (a.id || 0));
 
-  const initial = (user.name || "?").trim().charAt(0) || "?";
-  const download = (text, name, type) => {
+  const initial = (user.name || "?").trim().charAt(0).toUpperCase();
+  const dlFile = (text, name, type) => {
     if (!text) return;
     const u = URL.createObjectURL(new Blob([text], { type }));
     const a = document.createElement("a"); a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(u), 1500);
   };
-  const del = (v) => { if (window.confirm(t("این ویدیو از کتابخانه حذف شود؟", "Remove this video from your library?"))) removeFromLibrary(v.id); };
+  const del = (v) => { if (window.confirm(t("این ویدیو حذف شود؟", "Remove this video?"))) removeFromLibrary(v.id); };
+  const filteredLib = filterCat ? lib.filter(v => v.categoryId === filterCat) : lib;
+
+  const TABS = [
+    { id: "library", label: t("ویدیوهای من", "My Videos"), icon: "play" },
+    { id: "categories", label: t("دسته‌بندی‌ها", "Categories"), icon: "folder" },
+    { id: "downloads", label: t("دانلودها", "Downloads"), icon: "download" },
+    { id: "settings", label: t("تنظیمات", "Settings"), icon: "settings" },
+  ];
 
   return (
-    <div className="relative">
-      <div className="absolute top-0 inset-x-0 h-[460px] overflow-hidden pointer-events-none">
-        <ProfileBgVideo />
-        <div className="absolute inset-0 bg-black/40"></div>
-        <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-transparent to-base"></div>
-        <div className="absolute bottom-0 inset-x-0 h-44 bg-gradient-to-t from-base to-transparent"></div>
+    /* Unique full-bleed dark layout — intentionally different from every other page */
+    <div className="min-h-screen" style={{ background: "linear-gradient(135deg, #0a0a14 0%, #0d0d1a 40%, #060610 100%)" }}>
+      {/* Top accent bar */}
+      <div className="h-1 w-full" style={{ background: "linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa)" }}></div>
+
+      {/* Hero strip */}
+      <div className="relative overflow-hidden" style={{ minHeight: 220 }}>
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+          <ProfileBgVideo />
+          <div className="absolute inset-0" style={{ background: "linear-gradient(to bottom, rgba(10,10,20,0.55) 0%, rgba(10,10,20,0.92) 70%, #0a0a14 100%)" }}></div>
+        </div>
+        <div className="relative z-10 max-w-6xl mx-auto px-6 md:px-12 pt-20 pb-8 flex flex-wrap items-end gap-6">
+          {/* Avatar */}
+          <div className="relative shrink-0">
+            <div className="w-20 h-20 rounded-2xl flex items-center justify-center text-2xl font-extrabold text-white select-none"
+              style={{ background: "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)", boxShadow: "0 0 0 3px rgba(99,102,241,0.35), 0 8px 32px rgba(99,102,241,0.4)" }}>
+              {initial}
+            </div>
+            {hasSub(user) && (
+              <span className="absolute -bottom-2 -end-2 w-7 h-7 rounded-full flex items-center justify-center"
+                style={{ background: "linear-gradient(135deg, #6366f1, #a78bfa)", boxShadow: "0 0 0 2px #0a0a14" }}>
+                <Ic name="sparkles" size={13} className="text-white" />
+              </span>
+            )}
+          </div>
+          {/* Name + plan */}
+          <div className="min-w-0">
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white leading-tight">{user.name || t("کاربر EasySub", "EasySub user")}</h1>
+            {user.email && <p className="mt-1 text-sm text-white/50" dir="ltr">{user.email}</p>}
+            <span className="mt-2 inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold text-white"
+              style={{ background: "rgba(99,102,241,0.25)", border: "1px solid rgba(99,102,241,0.45)" }}>
+              <Ic name="sparkles" size={11} />
+              {hasSub(user) ? t(fa(daysLeft(user)) + " روز اشتراک باقی‌مانده", daysLeft(user) + " days left") : t("بدون اشتراک فعال", "No active plan")}
+            </span>
+          </div>
+          {/* Stats */}
+          <div className="ms-auto flex gap-5 shrink-0">
+            {[[fa(lib.length), t("ویدیو", "Videos")], [fa(allNotes.length), t("یادداشت", "Notes")], [fa(cats.length), t("دسته", "Categories")]].map(([n, l]) => (
+              <div key={l} className="text-center">
+                <div className="text-xl font-extrabold text-white">{n}</div>
+                <div className="text-[11px] text-white/45 mt-0.5">{l}</div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
-      <div className="relative pt-16">
-      <section className="max-w-7xl mx-auto px-6 md:px-12 py-12">
-        {/* header card */}
-        <Reveal>
-          <div className="liquid-glass-strong rounded-3xl p-7 flex flex-wrap items-center gap-6">
-            <span className="liquid-glass w-20 h-20 rounded-full text-white flex items-center justify-center text-2xl font-extrabold uppercase">{initial}</span>
-            <div className="min-w-0">
-              <div className="flex items-center gap-3 flex-wrap">
-                <h1 className="text-2xl font-extrabold">{user.name || t("کاربر EasySub", "EasySub user")}</h1>
-                <span className="rounded-full bg-white text-black text-[11px] font-bold px-2.5 py-1 flex items-center gap-1">
-                  <Ic name="sparkles" size={11} /> {user.plan === "basic" ? t("پلن پایه", "Basic plan") : user.plan === "org" ? t("پلن سازمانی", "Team plan") : t("پلن حرفه‌ای", "Pro plan")}
-                </span>
-              </div>
-              {user.email && <p className="mt-1.5 text-sm text-white/60" dir="ltr">{user.email}</p>}
-            </div>
-            <div className="ms-auto flex items-center gap-6 text-center">
-              {[[fa(lib.length), t("ویدیوی ساخته‌شده", "videos created")], [fa(allNotes.length), t("یادداشت", "notes")], [fa(daysLeft(user)), t("روز اشتراک", "days left")]].map(([n, l]) => (
-                <div key={l}>
-                  <div className="text-xl font-extrabold text-white">{n}</div>
-                  <div className="text-[11px] text-white/60 mt-0.5">{l}</div>
-                </div>
-              ))}
-            </div>
+      {/* Main */}
+      <div className="max-w-6xl mx-auto px-6 md:px-12 pb-20">
+        {/* Upload CTA */}
+        <button type="button" onClick={goStudio}
+          className="w-full rounded-2xl p-5 flex items-center gap-4 text-start transition-all mb-6 mt-2"
+          style={{ background: "linear-gradient(135deg, rgba(99,102,241,0.18) 0%, rgba(139,92,246,0.12) 100%)", border: "1px solid rgba(99,102,241,0.3)" }}>
+          <span className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0"
+            style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)" }}>
+            <Ic name="upload" size={20} className="text-white" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="font-extrabold text-white">{t("ساخت زیرنویس جدید", "Create new subtitles")}</div>
+            <p className="text-xs text-white/50 mt-0.5">{t("فایل آپلود کن یا لینک مستقیم بده", "Upload a file or paste a direct link")}</p>
           </div>
-        </Reveal>
+          <Ic name={fwd()} size={18} className="text-white/40 shrink-0" />
+        </button>
 
-        {/* primary upload CTA */}
-        <Reveal delay={0.05}>
-          <button type="button" onClick={() => navigate("/studio")}
-            className="group mt-6 w-full liquid-glass-strong rounded-3xl p-6 sm:p-7 flex flex-wrap items-center gap-5 text-start hover:bg-white/5 transition-colors">
-            <span className="w-14 h-14 rounded-2xl bg-white text-black flex items-center justify-center shrink-0 transition-transform group-hover:scale-105"><Ic name="upload" size={24} /></span>
-            <div className="min-w-0">
-              <div className="text-lg font-extrabold">{t("ویدیوی جدید بساز", "Create a new video")}</div>
-              <p className="mt-1 text-sm text-white/60 leading-6">{t("یک لینک یوتیوب بده یا فایل آپلود کن — هوش مصنوعی زیرنویس فارسی می‌سازد.", "Paste a YouTube link or upload a file — AI builds Persian subtitles for it.")}</p>
-            </div>
-            <span className="ms-auto flex items-center gap-2 rounded-full bg-white text-black text-sm font-bold px-5 h-11 shrink-0 transition-transform group-hover:scale-105">
-              <Ic name="sparkles" size={15} /> {t("شروع در استودیو", "Open Studio")}
-            </span>
-          </button>
-        </Reveal>
-
-        {/* tabs */}
-        <Reveal delay={0.08} className="mt-8 flex gap-2 overflow-x-auto no-scrollbar pb-1">
+        {/* Tabs */}
+        <div className="flex gap-1 overflow-x-auto no-scrollbar pb-1 mb-6"
+          style={{ borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
           {TABS.map((tb) => (
             <button key={tb.id} type="button" onClick={() => setTab(tb.id)}
-              className={`shrink-0 flex items-center gap-2 rounded-full px-4 h-10 text-sm whitespace-nowrap transition-colors ${tab === tb.id ? "bg-white text-black font-bold" : "liquid-glass text-white/75 hover:text-white hover:bg-white/5"}`}>
+              className={`shrink-0 flex items-center gap-2 px-4 h-11 text-sm whitespace-nowrap font-medium transition-all rounded-t-xl ${tab === tb.id
+                ? "text-white border-b-2"
+                : "text-white/50 hover:text-white/80"}`}
+              style={tab === tb.id ? { borderColor: "#6366f1" } : {}}>
               <Ic name={tb.icon} size={15} /> {tb.label}
             </button>
           ))}
-        </Reveal>
+        </div>
 
         <AnimatePresence mode="wait">
-          <motion.div key={tab} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.4, ease: "easeOut" }} className="mt-8">
+          <motion.div key={tab} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
+
+            {/* ── My Videos tab ── */}
             {tab === "library" && (
-              lib.length ? (
-                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                  {lib.map((v) => <VideoCard key={v.id} v={v} onDelete={del} />)}
-                </div>
-              ) : (
-                <div className="liquid-glass rounded-2xl p-10 text-center text-sm text-white/65">{t("هنوز ویدیویی نساخته‌ای.", "You haven't created any videos yet.")}</div>
-              )
-            )}
-
-            {tab === "notes" && (
-              allNotes.length ? (
-                <div className="space-y-3 max-w-3xl">
-                  {allNotes.map((n) => (
-                    <button key={n.video.id + "-" + n.id} type="button" onClick={() => navigate("/watch/" + n.video.id)}
-                      className="w-full text-start rounded-2xl bg-surface border border-white/5 p-5 hover:border-white/15 transition-colors">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-brand tabular-nums">{fa(Math.floor(n.at / 60))}:{fa(String(n.at % 60).padStart(2, "0"))}</span>
-                        <span className="text-muted truncate ms-3">{vTitle(n.video)}</span>
-                      </div>
-                      <p className="mt-2 text-sm leading-7 text-white/85">{n.text}</p>
+              <div>
+                {/* Category filter pills */}
+                {cats.length > 0 && (
+                  <div className="flex gap-2 flex-wrap mb-5">
+                    <button type="button" onClick={() => setFilterCat(null)}
+                      className={`rounded-full px-3.5 h-8 text-xs font-medium transition-colors ${!filterCat ? "text-white" : "text-white/50 hover:text-white"}`}
+                      style={!filterCat ? { background: "rgba(99,102,241,0.35)", border: "1px solid rgba(99,102,241,0.5)" } : { border: "1px solid rgba(255,255,255,0.1)" }}>
+                      {t("همه", "All")}
                     </button>
-                  ))}
-                </div>
-              ) : (
-                <div className="liquid-glass rounded-2xl p-10 text-center text-sm text-white/65">{t("هنوز یادداشتی نداری — حین تماشا یادداشت اضافه کن.", "No notes yet — add notes while watching.")}</div>
-              )
+                    {cats.map(c => (
+                      <button key={c.id} type="button" onClick={() => setFilterCat(c.id === filterCat ? null : c.id)}
+                        className={`rounded-full px-3.5 h-8 text-xs font-medium transition-colors ${filterCat === c.id ? "text-white" : "text-white/50 hover:text-white"}`}
+                        style={filterCat === c.id ? { background: "rgba(99,102,241,0.35)", border: "1px solid rgba(99,102,241,0.5)" } : { border: "1px solid rgba(255,255,255,0.1)" }}>
+                        {c.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {filteredLib.length ? (
+                  <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {filteredLib.map((v) => (
+                      <div key={v.id} className="relative group">
+                        <VideoCard v={v} onDelete={del} />
+                        {cats.length > 0 && (
+                          <div className="mt-1.5 ps-1">
+                            <select value={v.categoryId || ""} onChange={(e) => setItemCategory(v.id, e.target.value || null)}
+                              className="text-[11px] text-white/45 bg-transparent border-none outline-none cursor-pointer hover:text-white transition-colors">
+                              <option value="">{t("بدون دسته", "No category")}</option>
+                              {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl p-10 text-center text-sm text-white/40" style={{ border: "1px dashed rgba(255,255,255,0.1)" }}>
+                    {filterCat ? t("در این دسته ویدیویی وجود ندارد.", "No videos in this category.") : t("هنوز ویدیویی نساخته‌ای.", "No videos yet.")}
+                  </div>
+                )}
+              </div>
             )}
 
+            {/* ── Categories tab ── */}
+            {tab === "categories" && (
+              <div className="max-w-xl space-y-4">
+                <p className="text-sm text-white/50 mb-4">{t("دسته‌بندی‌های شخصی برای سازمان‌دهی ویدیوهایت بساز.", "Create personal categories to organize your videos.")}</p>
+                {/* Add new */}
+                <form onSubmit={(e) => { e.preventDefault(); if (newCatName.trim()) { addCat(newCatName); setNewCatName(""); } }}
+                  className="flex gap-2">
+                  <input value={newCatName} onChange={(e) => setNewCatName(e.target.value)}
+                    placeholder={t("نام دستهٔ جدید…", "New category name…")}
+                    className="flex-1 h-11 rounded-xl px-4 text-sm text-white placeholder:text-white/35"
+                    style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)" }} />
+                  <button type="submit"
+                    className="h-11 rounded-xl px-5 text-sm font-bold text-white transition-colors"
+                    style={{ background: "rgba(99,102,241,0.35)", border: "1px solid rgba(99,102,241,0.5)" }}>
+                    {t("افزودن", "Add")}
+                  </button>
+                </form>
+                {/* List */}
+                {cats.length ? cats.map(c => (
+                  <div key={c.id} className="flex items-center justify-between rounded-xl px-4 h-12"
+                    style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                    <span className="text-sm text-white">{c.name}</span>
+                    <span className="flex items-center gap-3">
+                      <span className="text-xs text-white/35">{fa(lib.filter(v => v.categoryId === c.id).length)} {t("ویدیو", "videos")}</span>
+                      <button type="button" onClick={() => removeCat(c.id)} className="text-white/30 hover:text-red-400 transition-colors">
+                        <Ic name="trash" size={14} />
+                      </button>
+                    </span>
+                  </div>
+                )) : (
+                  <div className="rounded-xl p-8 text-center text-sm text-white/35" style={{ border: "1px dashed rgba(255,255,255,0.1)" }}>
+                    {t("هنوز دسته‌ای نساخته‌ای.", "No categories yet.")}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Downloads tab ── */}
             {tab === "downloads" && (
               lib.length ? (
                 <div className="space-y-3 max-w-3xl">
                   {lib.map((v) => (
-                    <div key={v.id} className="flex items-center gap-4 rounded-2xl bg-surface border border-white/5 p-5">
-                      <span className="w-11 h-11 rounded-xl bg-white/5 flex items-center justify-center text-brand shrink-0"><Ic name="fileText" size={19} /></span>
+                    <div key={v.id} className="flex items-center gap-4 rounded-2xl p-4"
+                      style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)" }}>
+                      <span className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ background: "rgba(99,102,241,0.2)" }}>
+                        <Ic name="fileText" size={17} style={{ color: "#a78bfa" }} />
+                      </span>
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold truncate">{vTitle(v)}</div>
-                        <div className="text-xs text-muted mt-0.5">{fa((v.cues || []).length)} {t("زیرنویس", "cues")} · {libDate(v.createdAt)}</div>
+                        <div className="text-sm font-semibold truncate text-white">{vTitle(v)}</div>
+                        <div className="text-xs text-white/35 mt-0.5">{fa((v.cues||[]).length)} {t("زیرنویس", "cues")} · {libDate(v.createdAt)}</div>
                       </div>
-                      <button type="button" onClick={() => download(v.srt, "easysub.srt", "text/plain")} className="flex items-center gap-2 rounded-xl bg-white/5 border border-white/10 px-3.5 h-9 text-xs hover:bg-white/10 transition-colors shrink-0">
-                        <Ic name="download" size={14} /> .srt
+                      <button type="button" onClick={() => dlFile(v.srt, "easysub.srt", "text/plain")}
+                        className="flex items-center gap-1.5 rounded-xl px-3 h-8 text-xs text-white/70 hover:text-white transition-colors shrink-0"
+                        style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                        <Ic name="download" size={12} /> .srt
                       </button>
-                      <button type="button" onClick={() => download(v.vtt, "easysub.vtt", "text/vtt")} className="flex items-center gap-2 rounded-xl bg-white/5 border border-white/10 px-3.5 h-9 text-xs hover:bg-white/10 transition-colors shrink-0">
-                        <Ic name="download" size={14} /> .vtt
+                      <button type="button" onClick={() => dlFile(v.vtt, "easysub.vtt", "text/vtt")}
+                        className="flex items-center gap-1.5 rounded-xl px-3 h-8 text-xs text-white/70 hover:text-white transition-colors shrink-0"
+                        style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                        <Ic name="download" size={12} /> .vtt
                       </button>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="liquid-glass rounded-2xl p-10 text-center text-sm text-white/65">{t("هنوز زیرنویسی برای دانلود نداری.", "No subtitles to download yet.")}</div>
+                <div className="rounded-xl p-8 text-center text-sm text-white/35" style={{ border: "1px dashed rgba(255,255,255,0.1)" }}>
+                  {t("هنوز زیرنویسی برای دانلود نداری.", "No subtitles to download yet.")}
+                </div>
               )
             )}
 
+            {/* ── Settings tab ── */}
             {tab === "settings" && (
-              <div className="max-w-xl space-y-4">
+              <div className="max-w-lg space-y-5">
                 {[[t("نام نمایشی", "Display name"), user.name || "", false, "name"], [t("ایمیل", "Email"), user.email || "", true, "email"]].map(([l, v, ltr, field]) => (
                   <div key={field} className="space-y-2">
-                    <label className="text-sm font-medium">{l}</label>
-                    <input defaultValue={v} dir={ltr ? "ltr" : undefined} style={ltr ? { textAlign: "left" } : undefined}
+                    <label className="text-sm font-medium text-white/80">{l}</label>
+                    <input defaultValue={v} dir={ltr ? "ltr" : undefined} style={ltr ? { textAlign: "left", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)" } : { background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)" }}
                       onBlur={(e) => loginUser({ [field]: e.target.value })}
-                      className="w-full h-11 rounded-xl bg-surface border border-white/10 px-4 text-sm focus-visible:ring-2 focus-visible:ring-white/70 focus:ring-2 focus:ring-brand/40" />
+                      className="w-full h-11 rounded-xl px-4 text-sm text-white focus-visible:ring-2 focus-visible:ring-indigo-500/70" />
                   </div>
                 ))}
-                <div className="flex items-center justify-between rounded-2xl bg-surface border border-white/5 p-5">
+                <div className="flex items-center justify-between rounded-2xl p-5" style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.25)" }}>
                   <div>
-                    <div className="text-sm font-semibold">{t("اشتراک فعلی", "Current plan")}: {user.plan === "basic" ? t("پایه", "Basic") : user.plan === "org" ? t("سازمانی", "Team") : t("حرفه‌ای", "Pro")}</div>
-                    <div className="text-xs text-muted mt-1">{t("روزهای باقی‌مانده", "Days remaining")}: {fa(daysLeft(user))}</div>
+                    <div className="text-sm font-semibold text-white">{t("اشتراک فعلی", "Current plan")}</div>
+                    <div className="text-xs text-white/50 mt-1">{hasSub(user) ? t(fa(daysLeft(user)) + " روز باقی‌مانده", daysLeft(user) + " days remaining") : t("بدون اشتراک", "No active plan")}</div>
                   </div>
-                  <button type="button" onClick={goPricing} className="rounded-xl bg-white/5 border border-white/10 px-4 h-10 text-sm hover:bg-white/10 transition-colors">{t("تغییر پلن", "Change plan")}</button>
-                </div>
-                <div className="flex gap-3 pt-2">
-                  <button type="button" onClick={() => { logoutUser(); navigate("/login"); }} className="rounded-xl bg-white/5 border border-white/10 px-5 h-11 text-sm text-red-300 hover:bg-red-500/10 transition-colors flex items-center gap-2">
-                    <Ic name="logout" size={15} /> {t("خروج از حساب", "Log out")}
+                  <button type="button" onClick={goPricing}
+                    className="rounded-xl px-4 h-9 text-sm font-bold text-white transition-colors"
+                    style={{ background: "rgba(99,102,241,0.4)", border: "1px solid rgba(99,102,241,0.55)" }}>
+                    {t("تمدید / ارتقا", "Renew / Upgrade")}
                   </button>
                 </div>
+                <button type="button" onClick={() => { logoutUser(); navigate("/login"); }}
+                  className="flex items-center gap-2 rounded-xl px-5 h-11 text-sm text-red-300 hover:text-red-200 transition-colors"
+                  style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                  <Ic name="logout" size={15} /> {t("خروج از حساب", "Log out")}
+                </button>
               </div>
             )}
+
           </motion.div>
         </AnimatePresence>
-      </section>
       </div>
     </div>
   );
@@ -3053,7 +3219,6 @@ function App() {
     return (
       <div key={lang} data-screen-label="login" className="relative">
         <LoginPage />
-        <div className="fixed top-4 end-4 z-50"><LangToggle /></div>
       </div>
     );
   }
@@ -3076,7 +3241,6 @@ function App() {
     return (
       <div key={lang} data-screen-label={route.page} className="relative">
         {page}
-        <div className="fixed top-4 end-4 z-50"><LangToggle /></div>
       </div>
     );
   }
