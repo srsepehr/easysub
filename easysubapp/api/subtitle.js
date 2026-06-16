@@ -46,6 +46,7 @@ const FA = {
   WHISPER_FAIL: (m) => `خطا در رونویسی صدا: ${m}`,
   TRANSLATE_FAIL: (m) => `خطا در ترجمه به فارسی: ${m}`,
   YT_NO_CAPTIONS: "زیرنویس این ویدیوی یوتیوب قابل دریافت نبود. ویدیویی با زیرنویس (CC) امتحان کنید یا فایل را مستقیم آپلود کنید.",
+  YT_NO_KEY: "برای دریافت زیرنویس یوتیوب باید کلید SUPADATA_API_KEY را در متغیرهای محیطی همین پروژه‌ی Vercel (برای هر دو محیط Preview و Production) تنظیم و سپس دوباره Deploy کنید. تا آن زمان می‌توانید فایل ویدیو را مستقیم آپلود کنید.",
   SERVER: (m) => `خطای سرور: ${m}`,
 };
 
@@ -90,6 +91,9 @@ export default async function handler(req, res) {
       // YouTube — transcript-based, no size/length limit
       segments = await youtubeSegments(yid, url);
       if (!segments || !segments.length) {
+        // Distinguish "key not configured in this deployment" from "captions truly
+        // unavailable" — the former is the most common cause of a red link error.
+        if (!SUPADATA_KEY) return res.status(422).json({ error: FA.YT_NO_KEY, code: "YT_NO_KEY" });
         return res.status(422).json({ error: FA.YT_NO_CAPTIONS, code: "YT_NO_CAPTIONS" });
       }
     } else if (blobUrl) {
@@ -252,7 +256,8 @@ async function supadataSegments(id, url) {
 
   for (const ep of endpoints) {
     try {
-      const r = await fetchT(ep, { headers: { "x-api-key": SUPADATA_KEY } }, 25000);
+      // Send both header styles so we don't depend on Supadata's exact auth scheme.
+      const r = await fetchT(ep, { headers: { "x-api-key": SUPADATA_KEY, "Authorization": `Bearer ${SUPADATA_KEY}` } }, 25000);
       if (!r.ok) {
         const body = await r.text().catch(() => "");
         console.error(`[supadata] HTTP ${r.status} ${body.slice(0, 200)}`);
