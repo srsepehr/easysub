@@ -438,15 +438,24 @@ async function transcribe(bytes, mimeType) {
 // ── Persian translation (LLaMA 3.3 70B) ─────────────────────────────────────
 
 const BATCH_SIZE = 40;
+const TRANSLATE_CONCURRENCY = 4;
 
+// Translate all batches with bounded concurrency so the whole pipeline stays well
+// under the serverless time limit (60s on Vercel Hobby). Order is preserved.
 async function translateToPersian(texts) {
-  const out = [];
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const chunk = texts.slice(i, i + BATCH_SIZE);
-    const translated = await translateChunk(chunk);
-    out.push(...translated);
+  const batches = [];
+  for (let i = 0; i < texts.length; i += BATCH_SIZE) batches.push(texts.slice(i, i + BATCH_SIZE));
+  const results = new Array(batches.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const idx = next++;
+      if (idx >= batches.length) return;
+      results[idx] = await translateChunk(batches[idx]);
+    }
   }
-  return out;
+  await Promise.all(Array.from({ length: Math.min(TRANSLATE_CONCURRENCY, batches.length) }, worker));
+  return results.flat();
 }
 
 async function translateChunk(texts) {

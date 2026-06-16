@@ -2645,11 +2645,11 @@ function StudioInner() {
   // files when Blob storage isn't configured. Returns the body plus the progress
   // point to resume from (Blob upload already consumed the first ~35%).
   const buildUploadBody = async () => {
-    // 1) Shrink the file: pull a small 16 kHz mono audio track out of the video in
-    //    the browser. This usually lands well under the inline-upload limit, so the
-    //    upload works without Blob storage. Falls back to the raw file on any error.
+    // 1) Shrink the file ONLY when it's too big for the inline path: pull a small
+    //    16 kHz mono audio track out of the video in the browser. Small files are
+    //    sent as-is (a known-good format for Whisper). Falls back to raw on any error.
     let media = file;
-    if (window.__extractAudio) {
+    if (file.size > BASE64_SAFE && window.__extractAudio) {
       try {
         setStageKey("extract"); setPct(0);
         const audio = await window.__extractAudio(file, (p) => setPct(Math.min(30, p * 0.3)));
