@@ -374,6 +374,8 @@ async function invidiousSegments(id) {
 // Fallback 3 — Direct YouTube InnerTube (best-effort; usually blocked from cloud IPs)
 async function innertubeSegments(id) {
   const clients = [
+    { headers: { "Content-Type": "application/json", "User-Agent": "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_4 like Mac OS X)", "X-Goog-Api-Format-Version": "2" },
+      key: null, ctx: { clientName: "IOS", clientVersion: "19.09.3", deviceModel: "iPhone16,2", hl: "en", gl: "US" } },
     { headers: { "Content-Type": "application/json", "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip" },
       key: INNERTUBE_KEY, ctx: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 30, hl: "en", gl: "US" } },
     { headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/537.36 SamsungBrowser/2.1 TV Safari/537.36" },
@@ -402,16 +404,43 @@ async function innertubeSegments(id) {
   return [];
 }
 
+// Fallback 4 — Scrape the watch page for the caption-track list. Sending a real
+// browser User-Agent + a consent cookie sometimes slips past the datacenter-IP
+// block where the InnerTube API is refused.
+async function scrapeSegments(id) {
+  try {
+    const r = await fetchT(`https://www.youtube.com/watch?v=${id}&hl=en`, {
+      headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", "Cookie": "CONSENT=YES+1" },
+    }, 12000);
+    if (!r.ok) return [];
+    const html = await r.text();
+    const m = html.match(/"captionTracks":(\[.*?\])/);
+    if (!m) return [];
+    let tracks;
+    try { tracks = JSON.parse(m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")); } catch (e) { return []; }
+    if (!Array.isArray(tracks) || !tracks.length) return [];
+    const track = pickEnglish(tracks, (t) => t.languageCode);
+    let base = (track.baseUrl || "").replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+    if (!base) return [];
+    if (!/[?&]fmt=/.test(base)) base += "&fmt=json3";
+    const cap = await fetchT(base, { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" } }, 12000);
+    if (!cap.ok) return [];
+    return parseCaptions(await cap.text());
+  } catch (e) { return []; }
+}
+
 // Try every caption source in order of reliability from a datacenter IP.
 async function youtubeSegments(id, url) {
   let segs = await supadataSegments(id, url);
   if (segs.length) { console.log(`[yt] supadata → ${segs.length} cues`); return segs; }
+  segs = await innertubeSegments(id);
+  if (segs.length) { console.log(`[yt] innertube → ${segs.length} cues`); return segs; }
+  segs = await scrapeSegments(id);
+  if (segs.length) { console.log(`[yt] scrape → ${segs.length} cues`); return segs; }
   segs = await pipedSegments(id);
   if (segs.length) { console.log(`[yt] piped → ${segs.length} cues`); return segs; }
   segs = await invidiousSegments(id);
   if (segs.length) { console.log(`[yt] invidious → ${segs.length} cues`); return segs; }
-  segs = await innertubeSegments(id);
-  if (segs.length) { console.log(`[yt] innertube → ${segs.length} cues`); return segs; }
   console.warn(`[yt] no captions found for ${id} (key set: ${!!SUPADATA_KEY})`);
   return [];
 }
