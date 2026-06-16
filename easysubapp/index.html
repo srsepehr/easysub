@@ -65,6 +65,88 @@
     return blob.url;
   };
 </script>
+<!-- Client-side audio extraction — turns an uploaded video/audio file into a small
+     16 kHz mono file entirely in the browser. This shrinks a big video down to a
+     few MB of audio (what Whisper wants anyway), so uploads sail through the
+     serverless pipeline even without Blob storage. Best-effort: callers fall back
+     to the raw file if anything here throws. lamejs (MP3 encoder) loads lazily. -->
+<script>
+  (function () {
+    let lamePromise = null;
+    function loadLame() {
+      if (window.lamejs) return Promise.resolve();
+      if (lamePromise) return lamePromise;
+      lamePromise = new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js";
+        s.onload = resolve;
+        s.onerror = () => reject(new Error("lamejs load failed"));
+        document.head.appendChild(s);
+      });
+      return lamePromise;
+    }
+
+    function encodeWav(pcm, rate) {
+      const buf = new ArrayBuffer(44 + pcm.length * 2);
+      const v = new DataView(buf);
+      const wr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+      wr(0, "RIFF"); v.setUint32(4, 36 + pcm.length * 2, true); wr(8, "WAVE");
+      wr(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+      v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+      wr(36, "data"); v.setUint32(40, pcm.length * 2, true);
+      let o = 44; for (let i = 0; i < pcm.length; i++) { v.setInt16(o, pcm[i], true); o += 2; }
+      return new Blob([buf], { type: "audio/wav" });
+    }
+
+    // Returns a small audio File, or throws so the caller can fall back to the raw file.
+    window.__extractAudio = async function (file, onProgress) {
+      const RATE = 16000;
+      if (file.size > 120 * 1024 * 1024) throw new Error("file too large to process in browser");
+      const ab = await file.arrayBuffer();
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) throw new Error("no AudioContext");
+      const ac = new AC();
+      let decoded;
+      try { decoded = await ac.decodeAudioData(ab.slice(0)); } finally { try { ac.close(); } catch (e) {} }
+      if (!decoded || !decoded.duration) throw new Error("decode failed");
+      if (decoded.duration > 30 * 60) throw new Error("audio too long to process in browser");
+
+      // Resample to 16 kHz mono (the OfflineAudioContext auto-downmixes to mono).
+      const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      const offline = new OAC(1, Math.ceil(decoded.duration * RATE), RATE);
+      const src = offline.createBufferSource();
+      src.buffer = decoded;
+      src.connect(offline.destination);
+      src.start(0);
+      const float = (await offline.startRendering()).getChannelData(0);
+
+      const pcm = new Int16Array(float.length);
+      for (let i = 0; i < float.length; i++) {
+        let s = float[i]; if (s > 1) s = 1; else if (s < -1) s = -1;
+        pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+
+      const base = (file.name || "audio").replace(/\.[^.]+$/, "");
+      try {
+        await loadLame();
+        const enc = new window.lamejs.Mp3Encoder(1, RATE, 64);
+        const parts = []; const block = 1152;
+        for (let i = 0; i < pcm.length; i += block) {
+          const out = enc.encodeBuffer(pcm.subarray(i, i + block));
+          if (out.length) parts.push(new Uint8Array(out));
+          if (onProgress && i % (block * 256) === 0) onProgress(Math.min(95, (i / pcm.length) * 100));
+        }
+        const end = enc.flush();
+        if (end.length) parts.push(new Uint8Array(end));
+        const blob = new Blob(parts, { type: "audio/mpeg" });
+        if (blob.size < 2000) throw new Error("mp3 encode produced no data");
+        return new File([blob], base + ".mp3", { type: "audio/mpeg" });
+      } catch (e) {
+        return new File([encodeWav(pcm, RATE)], base + ".wav", { type: "audio/wav" });
+      }
+    };
+  })();
+</script>
 <style>
   html { background: #0B0B0C; }
   body { margin: 0; background: #0B0B0C; color: #FAFAFA; font-family: "Vazirmatn", sans-serif; }
@@ -2399,6 +2481,7 @@ function StudioInner() {
   const newIdRef = React.useRef(null);
 
   const STAGE_LABELS = {
+    extract: t("آماده‌سازی صدا…", "Preparing audio…"),
     upload: t("آپلود فایل…", "Uploading file…"),
     download: t("دریافت ویدیو…", "Fetching the video…"),
     transcribe: t("استخراج گفتار…", "Extracting speech…"),
@@ -2406,16 +2489,18 @@ function StudioInner() {
     build: t("ساخت زیرنویس…", "Building subtitles…"),
   };
 
-  // Uploads go straight to Vercel Blob storage (see window.__blobUpload), so the
-  // real ceiling is Groq Whisper's 24 MB — not the old ~3 MB serverless-body wall.
-  // Files under BASE64_SAFE still work via the inline base64 path if Blob storage
-  // isn't enabled on the project. YouTube links have no size/length limit at all.
+  // We extract a small 16 kHz mono audio track in the browser (see __extractAudio)
+  // before uploading, so even a large video shrinks to a few MB that fit the
+  // serverless pipeline without Blob storage. RAW_MAX is the file we'll accept and
+  // process in-browser; MAX_UPLOAD is the ceiling for what we actually send (Groq's
+  // 24 MB cap); BASE64_SAFE is the inline-upload limit (Vercel's ~4.5 MB body wall).
+  const RAW_MAX = 120 * 1024 * 1024;
   const MAX_UPLOAD = 24 * 1024 * 1024;
   const BASE64_SAFE = 3 * 1024 * 1024;
   const pickFile = (f) => {
     if (!f) return;
-    if (f.size > MAX_UPLOAD) {
-      setError(t("فایل بیش از ۲۴ مگابایت است. یک فایل کوتاه‌تر آپلود کن، یا برای ویدیوی طولانی لینک یوتیوب را وارد کن (بدون محدودیت طول).", "File is larger than 24 MB. Upload a shorter file, or for long videos paste a YouTube link instead (no length limit)."));
+    if (f.size > RAW_MAX) {
+      setError(t("فایل بیش از ۱۲۰ مگابایت است. یک فایل کوتاه‌تر آپلود کن، یا برای ویدیوی طولانی لینک یوتیوب را وارد کن (بدون محدودیت).", "File is larger than 120 MB. Upload a shorter file, or for long videos paste a YouTube link instead (no limit)."));
       return;
     }
     setFile(f); setFileName(f.name); setError("");
@@ -2450,28 +2535,42 @@ function StudioInner() {
   // files when Blob storage isn't configured. Returns the body plus the progress
   // point to resume from (Blob upload already consumed the first ~35%).
   const buildUploadBody = async () => {
-    if (file.size > MAX_UPLOAD) {
-      throw new Error(t("حجم فایل زیاد است (حداکثر ۲۴ مگابایت). برای ویدیوی طولانی، لینک یوتیوب را وارد کن (بدون محدودیت طول).", "File is too large (max 24 MB). For long videos, paste a YouTube link instead (no length limit)."));
+    // 1) Shrink the file: pull a small 16 kHz mono audio track out of the video in
+    //    the browser. This usually lands well under the inline-upload limit, so the
+    //    upload works without Blob storage. Falls back to the raw file on any error.
+    let media = file;
+    if (window.__extractAudio) {
+      try {
+        setStageKey("extract"); setPct(0);
+        const audio = await window.__extractAudio(file, (p) => setPct(Math.min(30, p * 0.3)));
+        if (audio && audio.size > 2000 && audio.size < media.size) media = audio;
+      } catch (e) { /* keep the raw file */ }
     }
-    const tooBigForBase64 = t("آپلود فایل‌های بزرگ هنوز روی سرور فعال نشده است (Vercel Blob). فایل کوچک‌تر از ۳ مگابایت آپلود کن یا لینک ویدیو را وارد کن.", "Large-file upload isn't enabled on the server yet (Vercel Blob). Upload a file under 3 MB or paste a video link instead.");
+
+    // 2) Anything still over Groq's 24 MB cap can't be transcribed in one shot.
+    if (media.size > MAX_UPLOAD) {
+      throw new Error(t("این ویدیو برای پردازش بیش از حد طولانی است. یک بخش کوتاه‌تر آپلود کن یا لینک یوتیوب بده.", "This video is too long to process in one go. Upload a shorter clip or paste a YouTube link instead."));
+    }
+
+    const mimeType = media.type || "audio/mpeg";
+
+    // 3) Small enough for the inline base64 path → no Blob storage needed.
+    if (media.size <= BASE64_SAFE) {
+      const b64 = await readBase64(media);
+      return { stageStart: 0, body: { mediaBase64: b64, mimeType } };
+    }
+
+    // 4) Larger → needs Blob storage (direct browser→storage upload).
     if (window.__blobUpload) {
       try {
-        setStageKey("upload"); setPct(0);
-        const blobUrl = await window.__blobUpload(file, (p) => setPct(Math.min(34, (p || 0) * 0.34)));
-        return { stageStart: 35, body: { blobUrl, mimeType: file.type || "video/mp4" } };
+        setStageKey("upload");
+        const blobUrl = await window.__blobUpload(media, (p) => setPct(Math.min(34, 30 + (p || 0) * 0.04)));
+        return { stageStart: 35, body: { blobUrl, mimeType } };
       } catch (e) {
-        if (file.size <= BASE64_SAFE) {
-          const b64 = await readBase64(file);
-          return { stageStart: 0, body: { mediaBase64: b64, mimeType: file.type || "video/mp4" } };
-        }
-        throw new Error(tooBigForBase64);
+        throw new Error(t("آپلود این فایل ناموفق بود. برای فایل‌های بزرگ، ذخیره‌سازی Blob را در Vercel فعال کن یا فایل کوتاه‌تری آپلود کن.", "Uploading this file failed. For large files, enable Vercel Blob storage, or upload a shorter file."));
       }
     }
-    if (file.size <= BASE64_SAFE) {
-      const b64 = await readBase64(file);
-      return { stageStart: 0, body: { mediaBase64: b64, mimeType: file.type || "video/mp4" } };
-    }
-    throw new Error(tooBigForBase64);
+    throw new Error(t("این فایل برای آپلود مستقیم بزرگ است. ذخیره‌سازی Blob را در Vercel فعال کن یا فایل کوتاه‌تری آپلود کن.", "This file is too large for direct upload. Enable Vercel Blob storage, or upload a shorter file."));
   };
 
   // Real pipeline: one JSON request to the serverless function. The API returns
@@ -2599,7 +2698,7 @@ function StudioInner() {
                   ) : (
                     <>
                       <p className="mt-3 text-sm text-white font-semibold">{t("فایل ویدیو را این‌جا رها کن", "Drop your video file here")}</p>
-                      <p className="mt-1 text-xs text-white/65">{t("MP4 / MP3 — تا ۲۴ مگابایت. برای ویدیوی طولانی‌تر، لینک یوتیوب را وارد کن (بدون محدودیت).", "MP4 / MP3 — up to 24 MB. For longer videos, paste a YouTube link instead (no limit).")}</p>
+                      <p className="mt-1 text-xs text-white/65">{t("MP4 / MP3 — تا ۱۲۰ مگابایت. صدا در مرورگر فشرده می‌شود؛ برای ویدیوی خیلی طولانی لینک یوتیوب بده.", "MP4 / MP3 — up to 120 MB. Audio is compressed in your browser; for very long videos, paste a YouTube link.")}</p>
                     </>
                   )}
                 </div>
