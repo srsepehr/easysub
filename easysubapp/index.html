@@ -147,6 +147,116 @@
     };
   })();
 </script>
+<!-- Browser-side YouTube caption fetch — runs from the user's own (residential) IP,
+     so it can reach Piped/Invidious instances that YouTube blocks for Vercel's
+     datacenter IPs. Returns parsed caption segments; the server then only translates
+     them to Persian. Best-effort: the app falls back to the server path if every
+     instance fails, so this can only help. -->
+<script>
+  (function () {
+    const TIMEOUT = 8000;
+    async function jfetch(url, opts) {
+      const ac = new AbortController();
+      const tm = setTimeout(() => ac.abort(), TIMEOUT);
+      try { return await fetch(url, Object.assign({ signal: ac.signal }, opts || {})); }
+      finally { clearTimeout(tm); }
+    }
+    const decodeEnt = (s) => String(s || "")
+      .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/<[^>]+>/g, "");
+
+    function parseCaps(raw) {
+      const text = String(raw || "");
+      if (!text.trim()) return [];
+      if (/^\s*\{/.test(text)) {
+        try {
+          const d = JSON.parse(text);
+          if (Array.isArray(d.events)) {
+            return d.events.filter((e) => e.segs && e.tStartMs != null).map((e) => ({
+              start: e.tStartMs / 1000, end: (e.tStartMs + (e.dDurationMs || 1500)) / 1000,
+              text: e.segs.map((s) => s.utf8 || "").join("").replace(/\s+/g, " ").trim(),
+            })).filter((s) => s.text);
+          }
+        } catch (e) {}
+      }
+      if (/^\s*WEBVTT/.test(text)) {
+        const segs = []; const re = /(\d{1,2}:)?(\d{1,2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}:)?(\d{1,2}):(\d{2})[.,](\d{3})[^\n]*\n([\s\S]*?)(?=\n\s*\n|\n\s*\d{1,2}:|\s*$)/g;
+        let m; const toSec = (h, mm, ss, ms) => (+(h || 0)) * 3600 + +mm * 60 + +ss + +ms / 1000;
+        while ((m = re.exec(text)) !== null) {
+          const start = toSec((m[1] || "").replace(":", ""), m[2], m[3], m[4]);
+          const end = toSec((m[5] || "").replace(":", ""), m[6], m[7], m[8]);
+          const body = decodeEnt(m[9].replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+          if (body) segs.push({ start, end, text: body });
+        }
+        if (segs.length) return segs;
+      }
+      if (/<tt[\s>]|<p\b[^>]*\bbegin=/.test(text)) {
+        const tt = (v) => { if (v == null) return null; const s = String(v).trim();
+          if (/^\d+(\.\d+)?s$/.test(s)) return parseFloat(s);
+          if (/^\d+(\.\d+)?ms$/.test(s)) return parseFloat(s) / 1000;
+          const c = s.match(/^(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?$/);
+          if (c) return (+(c[1] || 0)) * 3600 + +c[2] * 60 + +c[3] + (c[4] ? parseFloat(`0.${c[4]}`) : 0);
+          const f = parseFloat(s); return isNaN(f) ? null : f; };
+        const segs = []; const re = /<p\b[^>]*\bbegin="([^"]+)"[^>]*?(?:\bend="([^"]+)")?[^>]*>([\s\S]*?)<\/p>/g; let m;
+        while ((m = re.exec(text)) !== null) { const start = tt(m[1]); if (start == null) continue; let end = tt(m[2]); if (end == null) end = start + 1.5;
+          const body = decodeEnt(m[3].replace(/<br\s*\/?>/gi, " ").replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+          if (body) segs.push({ start, end, text: body }); }
+        if (segs.length) return segs;
+      }
+      const segs = []; const re = /<text[^>]*\bstart="([\d.]+)"[^>]*?(?:\bdur="([\d.]+)")?[^>]*>([\s\S]*?)<\/text>/g; let m;
+      while ((m = re.exec(text)) !== null) { const start = parseFloat(m[1]); const dur = parseFloat(m[2] || "1.5");
+        const body = decodeEnt(m[3].replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+        if (body) segs.push({ start, end: start + dur, text: body }); }
+      return segs;
+    }
+
+    const INV = ["https://invidious.nerdvpn.de", "https://inv.nadeko.net", "https://invidious.jing.rocks", "https://yewtu.be", "https://invidious.fdn.fr"];
+    const PIPED = ["https://pipedapi.kavin.rocks", "https://pipedapi.adminforge.de", "https://pipedapi.leptons.xyz"];
+    const pickEn = (list, langOf) => list.find((x) => /^en/i.test(langOf(x) || "")) || list[0];
+
+    window.__ytCaptions = async function (id, onProgress) {
+      // Invidious first — its caption URLs are served by the instance itself (CORS-OK).
+      for (const host of INV) {
+        try {
+          const r = await jfetch(`${host}/api/v1/captions/${id}`, { headers: { Accept: "application/json" } });
+          if (r.ok) {
+            const j = await r.json();
+            const caps = j && j.captions;
+            if (Array.isArray(caps) && caps.length) {
+              const pick = pickEn(caps, (c) => c.languageCode || c.language_code);
+              let u = pick && pick.url;
+              if (u) {
+                if (!/^https?:/i.test(u)) u = host + u;
+                const cr = await jfetch(u);
+                if (cr.ok) { const segs = parseCaps(await cr.text()); if (segs.length) return segs; }
+              }
+            }
+          }
+        } catch (e) {}
+        if (onProgress) onProgress();
+      }
+      // Piped fallback — its subtitle URL may be a raw YouTube link (can be CORS-blocked).
+      for (const host of PIPED) {
+        try {
+          const r = await jfetch(`${host}/streams/${id}`, { headers: { Accept: "application/json" } });
+          if (r.ok) {
+            const j = await r.json();
+            const subs = j && j.subtitles;
+            if (Array.isArray(subs) && subs.length) {
+              const pick = pickEn(subs, (s) => s.code || s.language);
+              if (pick && pick.url) {
+                const cr = await jfetch(pick.url);
+                if (cr.ok) { const segs = parseCaps(await cr.text()); if (segs.length) return segs; }
+              }
+            }
+          }
+        } catch (e) {}
+        if (onProgress) onProgress();
+      }
+      return null;
+    };
+  })();
+</script>
 <style>
   html { background: #0B0B0C; }
   body { margin: 0; background: #0B0B0C; color: #FAFAFA; font-family: "Vazirmatn", sans-serif; }
@@ -2580,11 +2690,22 @@ function StudioInner() {
       let body, stageStart = 0;
       if (mode === "link") {
         body = { url: link.trim() };
+        startProgress(0, "download");
+        // Try fetching the YouTube captions in the browser first (from the user's own
+        // IP, which YouTube doesn't block like Vercel's). If it works, the server only
+        // translates; otherwise we fall back to the server-side fetch ({ url }).
+        const yid2 = ytId(link.trim());
+        if (yid2 && window.__ytCaptions) {
+          try {
+            const segs = await window.__ytCaptions(yid2);
+            if (segs && segs.length) body = { segments: segs };
+          } catch (e) {}
+        }
       } else {
         const built = await buildUploadBody();
         body = built.body; stageStart = built.stageStart;
+        startProgress(stageStart, stageStart > 0 ? "transcribe" : "download");
       }
-      startProgress(stageStart, stageStart > 0 ? "transcribe" : "download");
       const r = await fetch("/api/subtitle", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       // Vercel rejects oversized bodies at the edge with 413 before our function runs.
       if (r.status === 413) throw new Error(t("فایل برای آپلود مستقیم بزرگ‌تر از حد مجاز سرور است. لطفاً لینک یوتیوب یا لینک مستقیم ویدیو را وارد کن.", "The file is larger than the server allows for direct upload. Please paste a YouTube link or a direct video link instead."));

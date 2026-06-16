@@ -83,11 +83,24 @@ export default async function handler(req, res) {
   if (!KEY) return res.status(500).json({ error: FA.NO_KEY, code: "NO_KEY" });
 
   try {
-    const { url, mediaBase64, mimeType, blobUrl } = req.body || {};
+    const { url, mediaBase64, mimeType, blobUrl, segments: clientSegments } = req.body || {};
     let segments;
     const yid = url ? ytId(url) : null;
 
-    if (yid) {
+    if (Array.isArray(clientSegments) && clientSegments.length) {
+      // Captions were fetched in the browser (from the user's own IP) — just sanitize
+      // and translate them. No network fetch needed here.
+      segments = clientSegments
+        .map((s) => {
+          const start = Number(s && s.start) || 0;
+          const end = Number(s && s.end) || start + 1.5;
+          return { start, end, text: String((s && s.text) || "").replace(/\s+/g, " ").trim() };
+        })
+        .filter((s) => s.text)
+        .slice(0, 5000);
+      if (!segments.length) return res.status(422).json({ error: FA.NO_SPEECH, code: "NO_SPEECH" });
+      console.log(`[yt] browser-supplied → ${segments.length} cues`);
+    } else if (yid) {
       // YouTube — transcript-based, no size/length limit
       segments = await youtubeSegments(yid, url);
       if (!segments || !segments.length) {
