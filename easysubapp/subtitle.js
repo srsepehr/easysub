@@ -122,6 +122,13 @@ export default async function handler(req, res) {
 }
 
 // ── YouTube helpers ─────────────────────────────────────────────────────────
+//
+// IMPORTANT: YouTube heavily rate-limits / bot-blocks requests from cloud
+// datacenter IPs (Vercel, AWS, GCP). Hitting youtube.com directly from a
+// serverless function frequently returns NO caption tracks. The reliable fix is
+// to fetch captions through Piped / Invidious public instances, which run their
+// own infrastructure to bypass that blocking. We try those first, then fall back
+// to direct YouTube endpoints as a best-effort.
 
 function ytId(u) {
   const s = String(u || "");
@@ -129,136 +136,161 @@ function ytId(u) {
   return m ? m[1] : null;
 }
 
-// Get caption tracks — tries multiple YouTube APIs in order of reliability from
-// datacenter IPs. Returns an array of track objects with baseUrl.
-async function captionTracks(id) {
-  // 1) InnerTube TVHTML5 embedded client (least fingerprinted, often unblocked)
-  try {
-    const r = await fetchT("https://www.youtube.com/youtubei/v1/player", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/2.1 Chrome/56.0.2924.0 TV Safari/537.36" },
-      body: JSON.stringify({
-        context: { client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" } },
-        videoId: id,
-      }),
-    }, 15000);
-    if (r.ok) {
-      const j = await r.json();
-      const tr = j?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (tr && tr.length) return tr;
-    }
-  } catch (e) {}
+const decodeEnt = (s) => String(s || "")
+  .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<")
+  .replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/<[^>]+>/g, "");
 
-  // 2) InnerTube ANDROID client
-  try {
-    const r = await fetchT(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip" },
-      body: JSON.stringify({
-        context: { client: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 30, hl: "en", gl: "US" } },
-        videoId: id,
-      }),
-    }, 15000);
-    if (r.ok) {
-      const j = await r.json();
-      const tr = j?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (tr && tr.length) return tr;
-    }
-  } catch (e) {}
+// Parse any caption payload (JSON3, XML timedtext, or WebVTT) into segments.
+function parseCaptions(raw) {
+  const text = String(raw || "");
+  if (!text.trim()) return [];
 
-  // 3) InnerTube WEB client
-  try {
-    const r = await fetchT(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": UA },
-      body: JSON.stringify({
-        context: { client: { clientName: "WEB", clientVersion: "2.20240101.00.00", hl: "en", gl: "US" } },
-        videoId: id,
-      }),
-    }, 15000);
-    if (r.ok) {
-      const j = await r.json();
-      const tr = j?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (tr && tr.length) return tr;
-    }
-  } catch (e) {}
-
-  // 4) Legacy timedtext list API (often works from datacenter IPs)
-  try {
-    const listUrl = `https://video.google.com/timedtext?type=list&v=${id}`;
-    const r = await fetchT(listUrl, { headers: { "User-Agent": UA } }, 10000);
-    if (r.ok) {
-      const xml = await r.text();
-      // Parse tracks from <track id="..." name="" lang_code="en" .../>
-      const tracks = [];
-      const re = /<track[^>]+lang_code="([^"]*)"[^>]*name="([^"]*)"[^>]*\/?>/g;
-      let m;
-      while ((m = re.exec(xml)) !== null) {
-        const lang = m[1], name = m[2];
-        const base = `https://video.google.com/timedtext?v=${id}&lang=${encodeURIComponent(lang)}&name=${encodeURIComponent(name)}&fmt=json3`;
-        tracks.push({ languageCode: lang, name: { simpleText: name }, baseUrl: base });
+  // JSON3 (events[])
+  if (/^\s*\{/.test(text)) {
+    try {
+      const data = JSON.parse(text);
+      if (Array.isArray(data.events)) {
+        return data.events
+          .filter((e) => e.segs && e.tStartMs != null)
+          .map((e) => ({
+            start: e.tStartMs / 1000,
+            end: (e.tStartMs + (e.dDurationMs || 1500)) / 1000,
+            text: e.segs.map((s) => s.utf8 || "").join("").replace(/\s+/g, " ").trim(),
+          }))
+          .filter((s) => s.text);
       }
-      if (tracks.length) return tracks;
-    }
-  } catch (e) {}
+    } catch (e) {}
+  }
 
-  // 5) Scrape watch page as last resort
-  try {
-    const r = await fetchT(`https://www.youtube.com/watch?v=${id}&hl=en`, {
-      headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", "Cookie": "CONSENT=YES+1" },
-    }, 15000);
-    if (r.ok) {
-      const html = await r.text();
-      const m = html.match(/"captionTracks":(\[.*?\])/);
-      if (m) { try { return JSON.parse(m[1]); } catch (e) {} }
+  // WebVTT
+  if (/^\s*WEBVTT/.test(text)) {
+    const segs = [];
+    const re = /(\d{1,2}:)?(\d{1,2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}:)?(\d{1,2}):(\d{2})[.,](\d{3})[^\n]*\n([\s\S]*?)(?=\n\s*\n|\n\s*\d{1,2}:|\s*$)/g;
+    let m;
+    const toSec = (h, mm, ss, ms) => (+(h || 0)) * 3600 + +mm * 60 + +ss + +ms / 1000;
+    while ((m = re.exec(text)) !== null) {
+      const start = toSec((m[1] || "").replace(":", ""), m[2], m[3], m[4]);
+      const end = toSec((m[5] || "").replace(":", ""), m[6], m[7], m[8]);
+      const body = decodeEnt(m[9].replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+      if (body) segs.push({ start, end, text: body });
     }
-  } catch (e) {}
+    if (segs.length) return segs;
+  }
 
+  // XML timedtext (<text start="" dur="">)
+  const xmlSegs = [];
+  const re = /<text[^>]*\bstart="([\d.]+)"[^>]*?(?:\bdur="([\d.]+)")?[^>]*>([\s\S]*?)<\/text>/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const start = parseFloat(m[1]);
+    const dur = parseFloat(m[2] || "1.5");
+    const body = decodeEnt(m[3].replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+    if (body) xmlSegs.push({ start, end: start + dur, text: body });
+  }
+  return xmlSegs;
+}
+
+// Public Piped API instances (return subtitle URLs). Tried in order.
+const PIPED_HOSTS = [
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://pipedapi.leptons.xyz",
+  "https://api.piped.yt",
+];
+
+// Public Invidious instances (return caption VTT). Tried in order.
+const INVIDIOUS_HOSTS = [
+  "https://invidious.nerdvpn.de",
+  "https://inv.nadeko.net",
+  "https://invidious.fdn.fr",
+  "https://yewtu.be",
+];
+
+function pickEnglish(list, langOf) {
+  return list.find((x) => /^en/i.test(langOf(x) || "")) || list[0];
+}
+
+// Path 1 — Piped: GET /streams/{id} → subtitles[{url, code}]
+async function pipedSegments(id) {
+  for (const host of PIPED_HOSTS) {
+    try {
+      const r = await fetchT(`${host}/streams/${id}`, { headers: { Accept: "application/json" } }, 8000);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const subs = j?.subtitles;
+      if (!Array.isArray(subs) || !subs.length) continue;
+      const pick = pickEnglish(subs, (s) => s.code || s.language);
+      if (!pick?.url) continue;
+      const cr = await fetchT(pick.url, { headers: { "User-Agent": UA } }, 8000);
+      if (!cr.ok) continue;
+      const segs = parseCaptions(await cr.text());
+      if (segs.length) return segs;
+    } catch (e) {}
+  }
   return [];
 }
 
-async function youtubeSegments(id) {
-  const tracks = await captionTracks(id);
-  if (!tracks || !tracks.length) return [];
-
-  // Prefer English; otherwise the first track (usually the original language).
-  const track = tracks.find((t) => /^en/i.test(t.languageCode || "")) || tracks[0];
-  let base = (track.baseUrl || "").replace(/\\u0026/g, "&").replace(/\\\//g, "/");
-  if (!base) return [];
-  if (!/[?&]fmt=/.test(base)) base += "&fmt=json3";
-
-  const cap = await fetchT(base, { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" } }, 15000);
-  if (!cap.ok) return [];
-
-  const rawText = await cap.text().catch(() => "");
-  if (!rawText) return [];
-
-  // Try JSON3 format first
-  try {
-    const data = JSON.parse(rawText);
-    if (data && Array.isArray(data.events)) {
-      return data.events
-        .filter((e) => e.segs && (e.tStartMs != null))
-        .map((e) => ({
-          start: e.tStartMs / 1000,
-          end: (e.tStartMs + (e.dDurationMs || 1500)) / 1000,
-          text: e.segs.map((s) => s.utf8 || "").join("").replace(/\s+/g, " ").trim(),
-        }))
-        .filter((s) => s.text);
-    }
-  } catch (e) {}
-
-  // Fallback: parse XML timedtext format
-  const xmlSegs = [];
-  const re = /<text start="([^"]+)" dur="([^"]+)"[^>]*>([\s\S]*?)<\/text>/g;
-  let m;
-  while ((m = re.exec(rawText)) !== null) {
-    const start = parseFloat(m[1]);
-    const dur = parseFloat(m[2]);
-    const text = m[3].replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/<[^>]+>/g, "").trim();
-    if (text) xmlSegs.push({ start, end: start + dur, text });
+// Path 2 — Invidious: GET /api/v1/captions/{id} → captions[{label, languageCode, url}]
+async function invidiousSegments(id) {
+  for (const host of INVIDIOUS_HOSTS) {
+    try {
+      const r = await fetchT(`${host}/api/v1/captions/${id}`, { headers: { Accept: "application/json" } }, 8000);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const caps = j?.captions;
+      if (!Array.isArray(caps) || !caps.length) continue;
+      const pick = pickEnglish(caps, (c) => c.languageCode || c.language_code);
+      const capUrl = pick?.url ? (pick.url.startsWith("http") ? pick.url : host + pick.url) : null;
+      if (!capUrl) continue;
+      const cr = await fetchT(capUrl, { headers: { "User-Agent": UA } }, 8000);
+      if (!cr.ok) continue;
+      const segs = parseCaptions(await cr.text());
+      if (segs.length) return segs;
+    } catch (e) {}
   }
-  return xmlSegs;
+  return [];
+}
+
+// Path 3 — Direct YouTube InnerTube (best-effort; usually blocked from cloud IPs)
+async function innertubeSegments(id) {
+  const clients = [
+    { headers: { "Content-Type": "application/json", "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip" },
+      key: INNERTUBE_KEY, ctx: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 30, hl: "en", gl: "US" } },
+    { headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/537.36 SamsungBrowser/2.1 TV Safari/537.36" },
+      key: null, ctx: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" } },
+    { headers: { "Content-Type": "application/json", "User-Agent": UA },
+      key: INNERTUBE_KEY, ctx: { clientName: "WEB", clientVersion: "2.20240101.00.00", hl: "en", gl: "US" } },
+  ];
+  for (const c of clients) {
+    try {
+      const u = `https://www.youtube.com/youtubei/v1/player${c.key ? `?key=${c.key}` : ""}`;
+      const r = await fetchT(u, { method: "POST", headers: c.headers, body: JSON.stringify({ context: { client: c.ctx }, videoId: id }) }, 9000);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const tr = j?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (!tr || !tr.length) continue;
+      const track = pickEnglish(tr, (t) => t.languageCode);
+      let base = (track.baseUrl || "").replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+      if (!base) continue;
+      if (!/[?&]fmt=/.test(base)) base += "&fmt=json3";
+      const cap = await fetchT(base, { headers: { "User-Agent": UA } }, 9000);
+      if (!cap.ok) continue;
+      const segs = parseCaptions(await cap.text());
+      if (segs.length) return segs;
+    } catch (e) {}
+  }
+  return [];
+}
+
+// Try every caption source in order of reliability from a datacenter IP.
+async function youtubeSegments(id) {
+  let segs = await pipedSegments(id);
+  if (segs.length) return segs;
+  segs = await invidiousSegments(id);
+  if (segs.length) return segs;
+  segs = await innertubeSegments(id);
+  if (segs.length) return segs;
+  return [];
 }
 
 // ── Groq Whisper transcription ──────────────────────────────────────────────

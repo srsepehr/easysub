@@ -2386,10 +2386,14 @@ function StudioInner() {
     build: t("ساخت زیرنویس…", "Building subtitles…"),
   };
 
+  // Vercel serverless functions reject any request body over ~4.5 MB. We send the
+  // file as base64 (≈33% larger), so the safe raw-file ceiling is ~3 MB. Bigger
+  // videos must go through a YouTube or direct media link instead.
+  const MAX_UPLOAD = 3 * 1024 * 1024;
   const pickFile = (f) => {
     if (!f) return;
-    if (f.size > 20 * 1024 * 1024) {
-      setError(t("فایل بیش از ۲۰ مگابایت است. یک کلیپ کوتاه‌تر انتخاب کن یا لینک یوتیوب/مستقیم بده.", "File exceeds 20 MB. Choose a shorter clip or paste a YouTube/direct link."));
+    if (f.size > MAX_UPLOAD) {
+      setError(t("فایل بیش از ۳ مگابایت است. برای ویدیوهای بزرگ‌تر، لینک یوتیوب یا لینک مستقیم ویدیو را وارد کن (تا ۲۴ مگابایت).", "File is larger than 3 MB. For bigger videos, paste a YouTube link or a direct video link instead (up to 24 MB)."));
       return;
     }
     setFile(f); setFileName(f.name); setError("");
@@ -2427,14 +2431,16 @@ function StudioInner() {
       if (mode === "link") {
         body = { url: link.trim() };
       } else {
-        if (file.size > 20 * 1024 * 1024) {
-          throw new Error(t("حجم فایل زیاد است (حداکثر ۲۰ مگابایت برای آپلود مستقیم). یک کلیپ کوتاه‌تر آپلود کن یا لینک یوتیوب/مستقیم بده.", "File is too large (max 20 MB for direct upload). Upload a shorter clip or paste a YouTube/direct link."));
+        if (file.size > MAX_UPLOAD) {
+          throw new Error(t("حجم فایل زیاد است (حداکثر ۳ مگابایت برای آپلود مستقیم). برای ویدیوهای بزرگ‌تر، لینک یوتیوب یا لینک مستقیم ویدیو را وارد کن.", "File is too large (max 3 MB for direct upload). For bigger videos, paste a YouTube link or a direct video link instead."));
         }
         const b64 = await readBase64(file);
         body = { mediaBase64: b64, mimeType: file.type || "video/mp4" };
       }
       startProgress();
       const r = await fetch("/api/subtitle", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      // Vercel rejects oversized bodies at the edge with 413 before our function runs.
+      if (r.status === 413) throw new Error(t("فایل برای آپلود مستقیم بزرگ‌تر از حد مجاز سرور است. لطفاً لینک یوتیوب یا لینک مستقیم ویدیو را وارد کن.", "The file is larger than the server allows for direct upload. Please paste a YouTube link or a direct video link instead."));
       const data = await r.json().catch(() => null);
       if (!r.ok || !data) throw new Error((data && data.error) || ("خطای سرور (HTTP " + r.status + ")"));
 
