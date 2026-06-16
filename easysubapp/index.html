@@ -658,6 +658,8 @@ const LUCIDE = {
   flask: <><path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2" /><path d="M8.5 2h7" /><path d="M7 16h10" /></>,
   wallet: <><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" /><path d="M3 5v14a2 2 0 0 0 2 2h16v-5" /><path d="M18 12a2 2 0 0 0 0 4h4v-4Z" /></>,
   brain: <><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" /><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" /><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4" /><path d="M17.599 6.5a3 3 0 0 0 .399-1.375" /><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5" /><path d="M3.477 10.896a4 4 0 0 1 .585-.396" /><path d="M19.938 10.5a4 4 0 0 1 .585.396" /><path d="M6 18a4 4 0 0 1-1.967-.516" /><path d="M19.967 17.484A4 4 0 0 1 18 18" /></>,
+  maximize: <><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></>,
+  minimize: <><path d="M8 3v3a2 2 0 0 1-2 2H3" /><path d="M21 8h-3a2 2 0 0 1-2-2V3" /><path d="M3 16h3a2 2 0 0 1 2 2v3" /><path d="M16 21v-3a2 2 0 0 1 2-2h3" /></>,
 };
 
 function Ic({ name, size = 20, className = "", filled = false, strokeWidth = 2, ...rest }) {
@@ -2280,6 +2282,8 @@ function SubtitlePlayer({ item }) {
   const vref = React.useRef(null);
   const ytWrapRef = React.useRef(null);
   const ytRef = React.useRef(null);
+  const boxRef = React.useRef(null);
+  const [isFs, setIsFs] = React.useState(false);
   const [tm, setTm] = React.useState(0);
   const [dur, setDur] = React.useState(item.durationSec || 0);
   const [playing, setPlaying] = React.useState(false);
@@ -2341,6 +2345,25 @@ function SubtitlePlayer({ item }) {
     if (isYT) { ytRef.current && ytRef.current.setPlaybackRate && ytRef.current.setPlaybackRate(next); }
     else if (vref.current) vref.current.playbackRate = next;
   };
+  // Fullscreen the whole player box so OUR Persian subtitle overlay stays visible
+  // (fullscreening the bare YouTube iframe would show YouTube's own UI instead).
+  const toggleFullscreen = () => {
+    const el = boxRef.current; if (!el) return;
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fsEl) {
+      (document.exitFullscreen || document.webkitExitFullscreen || (() => {})).call(document);
+    } else if (el.requestFullscreen || el.webkitRequestFullscreen) {
+      (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+    } else if (vref.current && vref.current.webkitEnterFullscreen) {
+      vref.current.webkitEnterFullscreen(); // iOS Safari: native <video> only
+    }
+  };
+  React.useEffect(() => {
+    const onFs = () => setIsFs(!!(document.fullscreenElement || document.webkitFullscreenElement));
+    document.addEventListener("fullscreenchange", onFs);
+    document.addEventListener("webkitfullscreenchange", onFs);
+    return () => { document.removeEventListener("fullscreenchange", onFs); document.removeEventListener("webkitfullscreenchange", onFs); };
+  }, []);
   const download = (text, name, type) => {
     if (!text) return;
     const u = URL.createObjectURL(new Blob([text], { type }));
@@ -2373,7 +2396,7 @@ function SubtitlePlayer({ item }) {
           </div>
 
           <div className="liquid-glass rounded-[1.6rem] p-2.5">
-            <div className="relative rounded-[1.15rem] overflow-hidden bg-black group">
+            <div ref={boxRef} className="relative rounded-[1.15rem] overflow-hidden bg-black group">
               <div className="relative aspect-video">
                 {isYT ? (
                   <div className="absolute inset-0"><div ref={ytWrapRef} className="w-full h-full"></div></div>
@@ -2421,6 +2444,9 @@ function SubtitlePlayer({ item }) {
                     </button>
                     <button type="button" onClick={cycleSpeed} className="liquid-glass hidden sm:flex items-center gap-1 rounded-full px-3 h-8 text-xs text-white hover:bg-white/10 transition-colors">
                       <Ic name="gauge" size={14} /> {fa(speed)}×
+                    </button>
+                    <button type="button" onClick={toggleFullscreen} aria-label={t(isFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه", isFs ? "Exit fullscreen" : "Fullscreen")} className="liquid-glass flex items-center justify-center rounded-full w-8 h-8 text-white hover:bg-white/10 transition-colors">
+                      <Ic name={isFs ? "minimize" : "maximize"} size={14} />
                     </button>
                   </div>
                 </div>

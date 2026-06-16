@@ -272,19 +272,23 @@ function supadataToSegs(j) {
     : Array.isArray(j) ? j
     : null;
   if (!arr || !arr.length) return [];
-  let segs = arr.map((c) => {
-    const start = num(c.offset ?? c.start ?? c.startMs ?? c.tStartMs ?? c.startTime);
-    const dur = num(c.duration ?? c.dur ?? c.durationMs);
-    const text = String(c.text ?? c.content ?? c.segment ?? "").replace(/\s+/g, " ").trim();
-    return { start: start / 1000, end: (start + (dur || 1500)) / 1000, text };
-  }).filter((s) => s.text);
-  if (!segs.length) return [];
-  // Unit guard: offsets are documented in milliseconds. If they actually arrived
-  // in seconds, the /1000 above makes cue durations absurdly small — rescale.
-  const durs = segs.map((s) => s.end - s.start).filter((d) => d > 0).sort((a, b) => a - b);
-  const med = durs.length ? durs[Math.floor(durs.length / 2)] : 1;
-  if (med > 0 && med < 0.02) segs = segs.map((s) => ({ start: s.start * 1000, end: s.end * 1000, text: s.text }));
-  return segs;
+  const rows = arr.map((c) => ({
+    start: num(c.offset ?? c.start ?? c.startMs ?? c.tStartMs ?? c.startTime),
+    dur: num(c.duration ?? c.dur ?? c.durationMs),
+    text: String(c.text ?? c.content ?? c.segment ?? "").replace(/\s+/g, " ").trim(),
+  })).filter((r) => r.text);
+  if (!rows.length) return [];
+  // Supadata documents milliseconds, but AI-generated transcripts sometimes use
+  // seconds. Detect the unit from the largest value: only a millisecond clock
+  // produces values in the thousands for any non-trivial video. Guessing wrong
+  // here collapses every cue into the first ~2s, so subtitles never show.
+  const maxV = rows.reduce((m, r) => Math.max(m, r.start, r.dur), 0);
+  const div = maxV > 1000 ? 1000 : 1;
+  return rows.map((r) => {
+    const start = r.start / div;
+    const dur = r.dur > 0 ? r.dur / div : 1.5;
+    return { start, end: start + dur, text: r.text };
+  });
 }
 
 // Poll an async Supadata transcript job until it finishes (within our time budget).
