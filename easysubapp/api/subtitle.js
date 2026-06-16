@@ -17,7 +17,7 @@
 //   SUPADATA_API_KEY      optional — reliable YouTube transcripts, https://supadata.ai
 //   BLOB_READ_WRITE_TOKEN auto-set when you enable Vercel Blob storage on the project
 //   WHISPER_MODEL         default whisper-large-v3-turbo
-//   TRANSLATE_MODEL       default qwen/qwen3-32b
+//   TRANSLATE_MODEL       default llama-3.3-70b-versatile
 
 export const config = { maxDuration: 60 };
 
@@ -25,7 +25,7 @@ const GROQ = "https://api.groq.com/openai/v1";
 const KEY = process.env.GROQ_API_KEY;
 const SUPADATA_KEY = process.env.SUPADATA_API_KEY;
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "whisper-large-v3-turbo";
-const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "qwen/qwen3-32b";
+const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "llama-3.3-70b-versatile";
 const MAX_BYTES = 24 * 1024 * 1024; // Groq Whisper hard limit: 25 MB
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
@@ -284,11 +284,24 @@ function supadataToSegs(j) {
   // here collapses every cue into the first ~2s, so subtitles never show.
   const maxV = rows.reduce((m, r) => Math.max(m, r.start, r.dur), 0);
   const div = maxV > 1000 ? 1000 : 1;
-  return rows.map((r) => {
-    const start = r.start / div;
-    const dur = r.dur > 0 ? r.dur / div : 1.5;
-    return { start, end: start + dur, text: r.text };
-  });
+  const segs = rows
+    .map((r) => {
+      const start = r.start / div;
+      const dur = r.dur > 0 ? r.dur / div : 0;
+      return { start, end: dur > 0 ? start + dur : start, text: r.text };
+    })
+    .sort((a, b) => a.start - b.start);
+  // Generated transcripts often carry a start time but no (or a tiny) duration, so
+  // a cue would flash for a moment and vanish while the speaker keeps talking —
+  // which reads as "out of sync". Hold each cue until the next one begins (capped
+  // so a long pause doesn't leave one line lingering forever).
+  for (let i = 0; i < segs.length; i++) {
+    const next = segs[i + 1];
+    const hold = next ? next.start - 0.05 : segs[i].end || segs[i].start + 3;
+    segs[i].end = Math.min(Math.max(segs[i].end, hold), segs[i].start + 7);
+    if (segs[i].end < segs[i].start + 0.4) segs[i].end = segs[i].start + 0.4;
+  }
+  return segs;
 }
 
 // Poll an async Supadata transcript job until it finishes (within our time budget).
@@ -539,7 +552,6 @@ async function translateToPersian(texts) {
 async function translateChunk(texts, attempt = 0) {
   const numbered = texts.map((t, i) => `${i + 1}. ${t}`).join("\n");
   const prompt =
-    "/no_think\n" + // Qwen3: disable chain-of-thought so we only get the answer
     "You are a Persian subtitle translator. Translate each numbered line to fluent, natural, modern Persian (Farsi).\n" +
     "Rules:\n" +
     "- Output ONLY the translated lines, numbered exactly like the input.\n" +
