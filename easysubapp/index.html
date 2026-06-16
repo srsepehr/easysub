@@ -2710,7 +2710,7 @@ function StudioInner() {
       // Vercel rejects oversized bodies at the edge with 413 before our function runs.
       if (r.status === 413) throw new Error(t("فایل برای آپلود مستقیم بزرگ‌تر از حد مجاز سرور است. لطفاً لینک یوتیوب یا لینک مستقیم ویدیو را وارد کن.", "The file is larger than the server allows for direct upload. Please paste a YouTube link or a direct video link instead."));
       const data = await r.json().catch(() => null);
-      if (!r.ok || !data) throw new Error((data && data.error) || ("خطای سرور (HTTP " + r.status + ")"));
+      if (!r.ok || !data) throw new Error(((data && data.error) || ("خطای سرور (HTTP " + r.status + ")")) + ((data && data.detail) ? ("\n[" + data.detail + "]") : ""));
 
       const url = mode === "link" ? link.trim() : "";
       const yid = mode === "link" ? ytId(url) : null;
