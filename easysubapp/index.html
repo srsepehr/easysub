@@ -46,6 +46,22 @@
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://accounts.google.com/gsi/client" async></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<!-- Vercel Blob client uploader — lets the browser send large media files straight
+     to Blob storage, bypassing Vercel's ~4.5 MB serverless request-body wall. Loaded
+     lazily from a CDN because this app has no build step. window.__blobUpload returns
+     the public blob URL, which the app then hands to /api/subtitle. -->
+<script type="module">
+  window.__blobUpload = async (file, onProgress) => {
+    const { upload } = await import("https://esm.sh/@vercel/blob@0.27/client");
+    const blob = await upload(file.name || "media", file, {
+      access: "public",
+      handleUploadUrl: "/api/blob-upload",
+      contentType: file.type || "application/octet-stream",
+      onUploadProgress: (ev) => { try { onProgress && onProgress(ev && ev.percentage != null ? ev.percentage : 0); } catch (e) {} },
+    });
+    return blob.url;
+  };
+</script>
 <style>
   html { background: #0B0B0C; }
   body { margin: 0; background: #0B0B0C; color: #FAFAFA; font-family: "Vazirmatn", sans-serif; }
@@ -2380,20 +2396,23 @@ function StudioInner() {
   const newIdRef = React.useRef(null);
 
   const STAGE_LABELS = {
+    upload: t("آپلود فایل…", "Uploading file…"),
     download: t("دریافت ویدیو…", "Fetching the video…"),
     transcribe: t("استخراج گفتار…", "Extracting speech…"),
     translate: t("ترجمه به فارسی…", "Translating to Persian…"),
     build: t("ساخت زیرنویس…", "Building subtitles…"),
   };
 
-  // Vercel serverless functions reject any request body over ~4.5 MB. We send the
-  // file as base64 (≈33% larger), so the safe raw-file ceiling is ~3 MB. Bigger
-  // videos must go through a YouTube or direct media link instead.
-  const MAX_UPLOAD = 3 * 1024 * 1024;
+  // Uploads go straight to Vercel Blob storage (see window.__blobUpload), so the
+  // real ceiling is Groq Whisper's 24 MB — not the old ~3 MB serverless-body wall.
+  // Files under BASE64_SAFE still work via the inline base64 path if Blob storage
+  // isn't enabled on the project. YouTube links have no size/length limit at all.
+  const MAX_UPLOAD = 24 * 1024 * 1024;
+  const BASE64_SAFE = 3 * 1024 * 1024;
   const pickFile = (f) => {
     if (!f) return;
     if (f.size > MAX_UPLOAD) {
-      setError(t("فایل بیش از ۳ مگابایت است. برای ویدیوهای بزرگ‌تر، لینک یوتیوب یا لینک مستقیم ویدیو را وارد کن (تا ۲۴ مگابایت).", "File is larger than 3 MB. For bigger videos, paste a YouTube link or a direct video link instead (up to 24 MB)."));
+      setError(t("فایل بیش از ۲۴ مگابایت است. یک فایل کوتاه‌تر آپلود کن، یا برای ویدیوی طولانی لینک یوتیوب را وارد کن (بدون محدودیت طول).", "File is larger than 24 MB. Upload a shorter file, or for long videos paste a YouTube link instead (no length limit)."));
       return;
     }
     setFile(f); setFileName(f.name); setError("");
@@ -2408,10 +2427,10 @@ function StudioInner() {
   // Smooth, believable progress bar. It eases toward 92% while the request is in
   // flight (the work happens server-side in one call) and snaps to 100% on success.
   const progRef = React.useRef(null);
-  const startProgress = () => {
+  const startProgress = (from = 0, firstStage = "download") => {
     stopProgress();
-    let p = 0;
-    setPct(0); setStageKey("download");
+    let p = from;
+    setPct(from); setStageKey(firstStage);
     progRef.current = setInterval(() => {
       p += Math.max(0.5, (92 - p) * 0.035);
       if (p > 92) p = 92;
@@ -2423,21 +2442,47 @@ function StudioInner() {
   const stopProgress = () => { if (progRef.current) { clearInterval(progRef.current); progRef.current = null; } };
   React.useEffect(() => () => stopProgress(), []);
 
+  // Build the request body for an uploaded file. Prefers Vercel Blob (direct
+  // browser→storage upload, no size wall); falls back to inline base64 for small
+  // files when Blob storage isn't configured. Returns the body plus the progress
+  // point to resume from (Blob upload already consumed the first ~35%).
+  const buildUploadBody = async () => {
+    if (file.size > MAX_UPLOAD) {
+      throw new Error(t("حجم فایل زیاد است (حداکثر ۲۴ مگابایت). برای ویدیوی طولانی، لینک یوتیوب را وارد کن (بدون محدودیت طول).", "File is too large (max 24 MB). For long videos, paste a YouTube link instead (no length limit)."));
+    }
+    const tooBigForBase64 = t("آپلود فایل‌های بزرگ هنوز روی سرور فعال نشده است (Vercel Blob). فایل کوچک‌تر از ۳ مگابایت آپلود کن یا لینک ویدیو را وارد کن.", "Large-file upload isn't enabled on the server yet (Vercel Blob). Upload a file under 3 MB or paste a video link instead.");
+    if (window.__blobUpload) {
+      try {
+        setStageKey("upload"); setPct(0);
+        const blobUrl = await window.__blobUpload(file, (p) => setPct(Math.min(34, (p || 0) * 0.34)));
+        return { stageStart: 35, body: { blobUrl, mimeType: file.type || "video/mp4" } };
+      } catch (e) {
+        if (file.size <= BASE64_SAFE) {
+          const b64 = await readBase64(file);
+          return { stageStart: 0, body: { mediaBase64: b64, mimeType: file.type || "video/mp4" } };
+        }
+        throw new Error(tooBigForBase64);
+      }
+    }
+    if (file.size <= BASE64_SAFE) {
+      const b64 = await readBase64(file);
+      return { stageStart: 0, body: { mediaBase64: b64, mimeType: file.type || "video/mp4" } };
+    }
+    throw new Error(tooBigForBase64);
+  };
+
   // Real pipeline: one JSON request to the serverless function. The API returns
   // Persian error messages, which we surface as-is.
   const runPipeline = async () => {
     try {
-      let body;
+      let body, stageStart = 0;
       if (mode === "link") {
         body = { url: link.trim() };
       } else {
-        if (file.size > MAX_UPLOAD) {
-          throw new Error(t("حجم فایل زیاد است (حداکثر ۳ مگابایت برای آپلود مستقیم). برای ویدیوهای بزرگ‌تر، لینک یوتیوب یا لینک مستقیم ویدیو را وارد کن.", "File is too large (max 3 MB for direct upload). For bigger videos, paste a YouTube link or a direct video link instead."));
-        }
-        const b64 = await readBase64(file);
-        body = { mediaBase64: b64, mimeType: file.type || "video/mp4" };
+        const built = await buildUploadBody();
+        body = built.body; stageStart = built.stageStart;
       }
-      startProgress();
+      startProgress(stageStart, stageStart > 0 ? "transcribe" : "download");
       const r = await fetch("/api/subtitle", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       // Vercel rejects oversized bodies at the edge with 413 before our function runs.
       if (r.status === 413) throw new Error(t("فایل برای آپلود مستقیم بزرگ‌تر از حد مجاز سرور است. لطفاً لینک یوتیوب یا لینک مستقیم ویدیو را وارد کن.", "The file is larger than the server allows for direct upload. Please paste a YouTube link or a direct video link instead."));
@@ -2530,7 +2575,7 @@ function StudioInner() {
                   </button>
                 </div>
                 <p className="mt-2.5 text-center text-[11px] text-white/55" style={{ textShadow: "0 1px 10px rgba(0,0,0,0.8)" }}>
-                  {t("لینک یوتیوب یا لینک مستقیم .mp4/.mp3/.wav وارد کن", "Paste a YouTube link or a direct .mp4/.mp3/.wav link")}
+                  {t("لینک یوتیوب (هر طول، بدون محدودیت) یا لینک مستقیم .mp4/.mp3/.wav", "YouTube link (any length, no limit) or a direct .mp4/.mp3/.wav link")}
                 </p>
                 </div>
               ) : (
@@ -2551,7 +2596,7 @@ function StudioInner() {
                   ) : (
                     <>
                       <p className="mt-3 text-sm text-white font-semibold">{t("فایل ویدیو را این‌جا رها کن", "Drop your video file here")}</p>
-                      <p className="mt-1 text-xs text-white/65">{t("MP4 / MP3 — حداکثر ۲۰ مگابایت. برای فایل بزرگ‌تر، لینک مستقیم ویدیو یا صدا را بده.", "MP4 / MP3 — up to 20 MB. For larger files, paste a direct video or audio link.")}</p>
+                      <p className="mt-1 text-xs text-white/65">{t("MP4 / MP3 — تا ۲۴ مگابایت. برای ویدیوی طولانی‌تر، لینک یوتیوب را وارد کن (بدون محدودیت).", "MP4 / MP3 — up to 24 MB. For longer videos, paste a YouTube link instead (no limit).")}</p>
                     </>
                   )}
                 </div>
