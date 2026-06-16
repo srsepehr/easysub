@@ -27,6 +27,7 @@ Live: https://easysub-srtt.vercel.app
 | `GROQ_API_KEY` | **yes** | Whisper transcription + Persian translation. Free at https://console.groq.com |
 | `SUPADATA_API_KEY` | recommended | Reliable YouTube transcripts from datacenter IPs. Free tier at https://supadata.ai. Without it, YouTube falls back to best-effort keyless sources (often blocked on Vercel). |
 | `BLOB_READ_WRITE_TOKEN` | for large uploads | Auto-injected when you enable Blob storage (below). Without it, uploads are capped at ~3 MB. |
+| `UPLOAD_GATE_TOKEN` | optional | Shared token the app sends in the Blob upload request; the `/api/blob-upload` route rejects requests without it. Defaults to `easysub-web-upload`. Override it (and the matching value in `index.html`) for a non-public value. This is a drive-by deterrent, not real auth — add server-side auth before a public launch. |
 | `WHISPER_MODEL` | no | Defaults to `whisper-large-v3-turbo`. |
 | `TRANSLATE_MODEL` | no | Defaults to `llama-3.3-70b-versatile`. |
 

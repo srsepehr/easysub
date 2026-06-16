@@ -57,6 +57,9 @@
       access: "public",
       handleUploadUrl: "/api/blob-upload",
       contentType: file.type || "application/octet-stream",
+      // Shared gate token the server checks before minting an upload token (see
+      // api/blob-upload.js). Keep this value in sync with UPLOAD_GATE_TOKEN if set.
+      clientPayload: JSON.stringify({ gate: "easysub-web-upload" }),
       onUploadProgress: (ev) => { try { onProgress && onProgress(ev && ev.percentage != null ? ev.percentage : 0); } catch (e) {} },
     });
     return blob.url;
