@@ -107,7 +107,7 @@ export default async function handler(req, res) {
         // Distinguish "key not configured in this deployment" from "captions truly
         // unavailable" — the former is the most common cause of a red link error.
         if (!SUPADATA_KEY) return res.status(422).json({ error: FA.YT_NO_KEY, code: "YT_NO_KEY" });
-        return res.status(422).json({ error: FA.YT_NO_CAPTIONS, code: "YT_NO_CAPTIONS" });
+        return res.status(422).json({ error: FA.YT_NO_CAPTIONS, code: "YT_NO_CAPTIONS", detail: lastYtDiag || undefined });
       }
     } else if (blobUrl) {
       // Browser uploaded the file directly to Vercel Blob → read it back by URL.
@@ -255,60 +255,99 @@ function parseCaptions(raw) {
 
 // Primary — Supadata transcript API (handles datacenter IP-blocking on its side).
 // GET /v1/youtube/transcript → { content: [{ text, offset(ms), duration(ms) }], ... }
-// Hardened against response-shape and time-unit variations, with the unified
-// /v1/transcript endpoint as a secondary shape. Logs failures to the function log.
+// We first ask for native captions, then fall back to mode=auto so Supadata's AI
+// pipeline GENERATES a transcript for videos that ship no captions. Generation is
+// async: the API may answer with a { jobId } that we poll until it completes.
+// `lastYtDiag` carries the last failure reason out to the client for debugging.
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+let lastYtDiag = "";
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Map any Supadata transcript payload (sync result or finished job) into segments.
+function supadataToSegs(j) {
+  const arr = Array.isArray(j?.content) ? j.content
+    : Array.isArray(j?.transcript) ? j.transcript
+    : Array.isArray(j?.data) ? j.data
+    : Array.isArray(j?.result?.content) ? j.result.content
+    : Array.isArray(j) ? j
+    : null;
+  if (!arr || !arr.length) return [];
+  let segs = arr.map((c) => {
+    const start = num(c.offset ?? c.start ?? c.startMs ?? c.tStartMs ?? c.startTime);
+    const dur = num(c.duration ?? c.dur ?? c.durationMs);
+    const text = String(c.text ?? c.content ?? c.segment ?? "").replace(/\s+/g, " ").trim();
+    return { start: start / 1000, end: (start + (dur || 1500)) / 1000, text };
+  }).filter((s) => s.text);
+  if (!segs.length) return [];
+  // Unit guard: offsets are documented in milliseconds. If they actually arrived
+  // in seconds, the /1000 above makes cue durations absurdly small — rescale.
+  const durs = segs.map((s) => s.end - s.start).filter((d) => d > 0).sort((a, b) => a - b);
+  const med = durs.length ? durs[Math.floor(durs.length / 2)] : 1;
+  if (med > 0 && med < 0.02) segs = segs.map((s) => ({ start: s.start * 1000, end: s.end * 1000, text: s.text }));
+  return segs;
+}
+
+// Poll an async Supadata transcript job until it finishes (within our time budget).
+async function supadataPoll(jobId, headers) {
+  const deadline = Date.now() + 42000; // stay within the serverless function window
+  while (Date.now() < deadline) {
+    await sleepMs(2500);
+    try {
+      const r = await fetchT(`https://api.supadata.ai/v1/transcript/${encodeURIComponent(jobId)}`, { headers }, 15000);
+      const j = await r.json().catch(() => null);
+      const status = String(j?.status || j?.state || "").toLowerCase();
+      if (/complete|done|success|finished/.test(status) || Array.isArray(j?.content)) {
+        const segs = supadataToSegs(j);
+        if (segs.length) return segs;
+      }
+      if (/fail|error|cancel/.test(status)) { lastYtDiag = `supadata job ${status}`; return []; }
+      // otherwise queued/active → keep polling
+    } catch (e) { /* transient — keep polling */ }
+  }
+  lastYtDiag = "supadata job timed out";
+  return [];
+}
 
 async function supadataSegments(id, url) {
   if (!SUPADATA_KEY) return [];
+  const headers = { "x-api-key": SUPADATA_KEY };
   const watch = url || `https://www.youtube.com/watch?v=${id}`;
+  const yidQ = url ? `url=${encodeURIComponent(url)}` : `videoId=${encodeURIComponent(id)}`;
+  // 1) native captions (cheap, instant)   2-3) mode=auto → generate if none exist
   const endpoints = [
-    `https://api.supadata.ai/v1/youtube/transcript?${url ? `url=${encodeURIComponent(url)}` : `videoId=${encodeURIComponent(id)}`}&text=false`,
-    `https://api.supadata.ai/v1/transcript?url=${encodeURIComponent(watch)}&text=false`,
+    `https://api.supadata.ai/v1/youtube/transcript?${yidQ}&text=false`,
+    `https://api.supadata.ai/v1/youtube/transcript?${yidQ}&text=false&mode=auto`,
+    `https://api.supadata.ai/v1/transcript?url=${encodeURIComponent(watch)}&text=false&mode=auto`,
   ];
 
   for (const ep of endpoints) {
     try {
-      // Send both header styles so we don't depend on Supadata's exact auth scheme.
-      const r = await fetchT(ep, { headers: { "x-api-key": SUPADATA_KEY, "Authorization": `Bearer ${SUPADATA_KEY}` } }, 25000);
-      if (!r.ok) {
-        const body = await r.text().catch(() => "");
-        console.error(`[supadata] HTTP ${r.status} ${body.slice(0, 200)}`);
-        continue;
+      const r = await fetchT(ep, { headers }, 25000);
+      const raw = await r.text().catch(() => "");
+      if (!r.ok) { lastYtDiag = `supadata HTTP ${r.status}: ${raw.slice(0, 140)}`; console.error(`[supadata] ${lastYtDiag}`); continue; }
+      let j; try { j = JSON.parse(raw); } catch (e) { lastYtDiag = `supadata bad json: ${raw.slice(0, 100)}`; continue; }
+
+      let segs = supadataToSegs(j);
+      if (segs.length) return segs;
+
+      // Async AI generation: the API handed back a job id — poll it to completion.
+      const jobId = j?.jobId || j?.job_id || j?.id;
+      if (jobId) {
+        console.log(`[supadata] polling job ${jobId}`);
+        segs = await supadataPoll(jobId, headers);
+        if (segs.length) return segs;
+      } else {
+        lastYtDiag = `supadata no content: ${raw.slice(0, 140)}`;
+        console.error(`[supadata] ${lastYtDiag}`);
       }
-      const j = await r.json().catch(() => null);
-      // Accept the documented `content` array plus a few likely aliases.
-      const arr = Array.isArray(j?.content) ? j.content
-        : Array.isArray(j?.transcript) ? j.transcript
-        : Array.isArray(j?.data) ? j.data
-        : Array.isArray(j) ? j
-        : null;
-      if (!arr || !arr.length) {
-        console.error(`[supadata] no transcript array in response: ${JSON.stringify(j).slice(0, 200)}`);
-        continue;
-      }
-
-      let segs = arr.map((c) => {
-        const start = num(c.offset ?? c.start ?? c.startMs ?? c.tStartMs ?? c.startTime);
-        const dur = num(c.duration ?? c.dur ?? c.durationMs);
-        const text = String(c.text ?? c.content ?? c.segment ?? "").replace(/\s+/g, " ").trim();
-        return { start: start / 1000, end: (start + (dur || 1500)) / 1000, text };
-      }).filter((s) => s.text);
-      if (!segs.length) continue;
-
-      // Unit guard: offsets are documented in milliseconds. If they actually arrived
-      // in seconds, the /1000 above makes cue durations absurdly small — rescale.
-      const durs = segs.map((s) => s.end - s.start).filter((d) => d > 0).sort((a, b) => a - b);
-      const med = durs.length ? durs[Math.floor(durs.length / 2)] : 1;
-      if (med > 0 && med < 0.02) segs = segs.map((s) => ({ start: s.start * 1000, end: s.end * 1000, text: s.text }));
-
-      return segs;
     } catch (e) {
-      console.error(`[supadata] ${String((e && e.message) || e)}`);
+      lastYtDiag = `supadata ${String((e && e.message) || e)}`;
+      console.error(`[supadata] ${lastYtDiag}`);
     }
   }
   return [];
 }
+
 
 // Public Piped API instances (return subtitle URLs). Tried in order.
 const PIPED_HOSTS = [
@@ -431,6 +470,7 @@ async function scrapeSegments(id) {
 
 // Try every caption source in order of reliability from a datacenter IP.
 async function youtubeSegments(id, url) {
+  lastYtDiag = "";
   let segs = await supadataSegments(id, url);
   if (segs.length) { console.log(`[yt] supadata → ${segs.length} cues`); return segs; }
   segs = await innertubeSegments(id);
