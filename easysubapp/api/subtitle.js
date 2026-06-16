@@ -197,6 +197,32 @@ function parseCaptions(raw) {
     if (segs.length) return segs;
   }
 
+  // TTML (<p begin="..." end="...">) — Piped and some YouTube tracks serve this
+  if (/<tt[\s>]|<p\b[^>]*\bbegin=/.test(text)) {
+    const ttmlTime = (v) => {
+      if (v == null) return null;
+      const s = String(v).trim();
+      if (/^\d+(\.\d+)?s$/.test(s)) return parseFloat(s);          // "1.5s"
+      if (/^\d+(\.\d+)?ms$/.test(s)) return parseFloat(s) / 1000;  // "100ms"
+      const c = s.match(/^(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?$/); // HH:MM:SS.mmm
+      if (c) return (+(c[1] || 0)) * 3600 + +c[2] * 60 + +c[3] + (c[4] ? parseFloat(`0.${c[4]}`) : 0);
+      const f = parseFloat(s);
+      return isNaN(f) ? null : f;
+    };
+    const ttmlSegs = [];
+    const tre = /<p\b[^>]*\bbegin="([^"]+)"[^>]*?(?:\bend="([^"]+)")?[^>]*>([\s\S]*?)<\/p>/g;
+    let tm;
+    while ((tm = tre.exec(text)) !== null) {
+      const start = ttmlTime(tm[1]);
+      if (start == null) continue;
+      let end = ttmlTime(tm[2]);
+      if (end == null) end = start + 1.5;
+      const body = decodeEnt(tm[3].replace(/<br\s*\/?>/gi, " ").replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+      if (body) ttmlSegs.push({ start, end, text: body });
+    }
+    if (ttmlSegs.length) return ttmlSegs;
+  }
+
   // XML timedtext (<text start="" dur="">)
   const xmlSegs = [];
   const re = /<text[^>]*\bstart="([\d.]+)"[^>]*?(?:\bdur="([\d.]+)")?[^>]*>([\s\S]*?)<\/text>/g;
