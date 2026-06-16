@@ -17,7 +17,7 @@
 //   SUPADATA_API_KEY      optional — reliable YouTube transcripts, https://supadata.ai
 //   BLOB_READ_WRITE_TOKEN auto-set when you enable Vercel Blob storage on the project
 //   WHISPER_MODEL         default whisper-large-v3-turbo
-//   TRANSLATE_MODEL       default llama-3.3-70b-versatile
+//   TRANSLATE_MODEL       default qwen/qwen3-32b
 
 export const config = { maxDuration: 60 };
 
@@ -25,7 +25,7 @@ const GROQ = "https://api.groq.com/openai/v1";
 const KEY = process.env.GROQ_API_KEY;
 const SUPADATA_KEY = process.env.SUPADATA_API_KEY;
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "whisper-large-v3-turbo";
-const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "llama-3.3-70b-versatile";
+const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "qwen/qwen3-32b";
 const MAX_BYTES = 24 * 1024 * 1024; // Groq Whisper hard limit: 25 MB
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
@@ -438,7 +438,8 @@ async function transcribe(bytes, mimeType) {
 // ── Persian translation (LLaMA 3.3 70B) ─────────────────────────────────────
 
 const BATCH_SIZE = 40;
-const TRANSLATE_CONCURRENCY = 4;
+const TRANSLATE_CONCURRENCY = 2;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Translate all batches with bounded concurrency so the whole pipeline stays well
 // under the serverless time limit (60s on Vercel Hobby). Order is preserved.
@@ -458,9 +459,14 @@ async function translateToPersian(texts) {
   return results.flat();
 }
 
-async function translateChunk(texts) {
+// Translate one batch. Resilient by design: transient failures (rate limits,
+// 5xx, timeouts) are retried with backoff, and if a batch still can't be
+// translated we keep the original lines instead of failing the whole job — the
+// user always gets subtitles, even if a few lines fall back to the source text.
+async function translateChunk(texts, attempt = 0) {
   const numbered = texts.map((t, i) => `${i + 1}. ${t}`).join("\n");
   const prompt =
+    "/no_think\n" + // Qwen3: disable chain-of-thought so we only get the answer
     "You are a Persian subtitle translator. Translate each numbered line to fluent, natural, modern Persian (Farsi).\n" +
     "Rules:\n" +
     "- Output ONLY the translated lines, numbered exactly like the input.\n" +
@@ -468,20 +474,36 @@ async function translateChunk(texts) {
     "- Keep lines short (max 42 characters) for subtitles.\n\n" +
     numbered;
 
-  const r = await fetchT(`${GROQ}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${KEY}` },
-    body: JSON.stringify({
-      model: TRANSLATE_MODEL,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.15,
-      max_tokens: 4096,
-    }),
-  }, 50000);
-  const data = await r.json();
-  if (!r.ok) throw new Error(FA.TRANSLATE_FAIL(data?.error?.message || `HTTP ${r.status}`));
+  let r, data;
+  try {
+    r = await fetchT(`${GROQ}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${KEY}` },
+      body: JSON.stringify({
+        model: TRANSLATE_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.15,
+        max_tokens: 8192,
+      }),
+    }, 50000);
+    data = await r.json().catch(() => null);
+  } catch (e) {
+    if (attempt < 2) { await sleep(800 * (attempt + 1)); return translateChunk(texts, attempt + 1); }
+    return texts; // network/timeout: keep source text rather than fail the job
+  }
 
-  const content = (data.choices?.[0]?.message?.content || "").trim();
+  if (!r.ok || !data) {
+    // Rate limit (429) or transient server error: back off and retry.
+    if ((r.status === 429 || r.status >= 500) && attempt < 2) {
+      await sleep(1200 * (attempt + 1));
+      return translateChunk(texts, attempt + 1);
+    }
+    return texts; // give up gracefully: keep source text
+  }
+
+  const content = (data.choices?.[0]?.message?.content || "")
+    .replace(/<think>[\s\S]*?<\/think>/gi, "") // strip any stray Qwen3 reasoning
+    .trim();
   const lines = content
     .split("\n")
     .map((l) => l.trim())
@@ -489,7 +511,7 @@ async function translateChunk(texts) {
     .map((l) => l.replace(/^\d+\.\s*/, "").trim());
 
   if (lines.length === texts.length) return lines;
-  return texts; // non-blocking fallback
+  return texts; // shape mismatch: non-blocking fallback
 }
 
 // ── SRT / VTT helpers ───────────────────────────────────────────────────────
