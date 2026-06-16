@@ -1,21 +1,29 @@
 // EasySub — Persian AI subtitle pipeline (Vercel serverless function)
 //
-// Two input paths:
-//   A) YouTube link  → pull the existing caption track (manual or auto/ASR) via
-//                       YouTube's InnerTube API, then translate to Persian.
-//   B) Direct media  → transcribe with Groq Whisper, then translate.
+// Input paths:
+//   A) YouTube link  → fetch the existing transcript and translate to Persian.
+//                       Supadata is the primary source (reliable from datacenter
+//                       IPs); Piped / Invidious / InnerTube are keyless fallbacks.
+//                       Caption-based, so this works for ANY video length — no size cap.
+//   B) Uploaded file → the browser uploads straight to Vercel Blob storage, we read
+//                       it back by URL and transcribe with Groq Whisper (up to ~24 MB).
+//   C) Small file (base64) or direct media link → transcribe with Groq Whisper.
 //
 // Returns plain JSON:  { srt, vtt, cues, model }  on success,
 //                      { error, code }            on failure.
 //
-// Required env var:  GROQ_API_KEY  (free at https://console.groq.com)
-// Optional:  WHISPER_MODEL (default whisper-large-v3-turbo)
-//            TRANSLATE_MODEL (default llama-3.3-70b-versatile)
+// Env vars:
+//   GROQ_API_KEY          required — free at https://console.groq.com
+//   SUPADATA_API_KEY      optional — reliable YouTube transcripts, https://supadata.ai
+//   BLOB_READ_WRITE_TOKEN auto-set when you enable Vercel Blob storage on the project
+//   WHISPER_MODEL         default whisper-large-v3-turbo
+//   TRANSLATE_MODEL       default llama-3.3-70b-versatile
 
 export const config = { maxDuration: 60 };
 
 const GROQ = "https://api.groq.com/openai/v1";
 const KEY = process.env.GROQ_API_KEY;
+const SUPADATA_KEY = process.env.SUPADATA_API_KEY;
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "whisper-large-v3-turbo";
 const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "llama-3.3-70b-versatile";
 const MAX_BYTES = 24 * 1024 * 1024; // Groq Whisper hard limit: 25 MB
@@ -26,7 +34,7 @@ const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const FA = {
   NO_KEY: "موتور زیرنویس هنوز راه‌اندازی نشده است. کلید GROQ_API_KEY را در تنظیمات Vercel اضافه کنید.",
   NOT_MEDIA: "این لینک یک فایل ویدیو یا صوتی مستقیم نیست. لطفاً یک لینک مستقیم .mp4/.mp3/.wav بدهید یا فایل را آپلود کنید.",
-  TOO_LARGE: "فایل بیش از حد بزرگ است (حداکثر ۲۴ مگابایت). یک فایل کوتاه‌تر آپلود کنید.",
+  TOO_LARGE: "فایل بیش از حد بزرگ است (حداکثر ۲۴ مگابایت). یک فایل کوتاه‌تر آپلود کنید یا لینک یوتیوب بدهید.",
   EMPTY: "فایل رسانه‌ای خالی است.",
   NO_SPEECH: "هیچ گفتاری در این رسانه شناسایی نشد.",
   INVALID_URL: "لطفاً یک لینک معتبر http یا https وارد کنید.",
@@ -38,6 +46,7 @@ const FA = {
   WHISPER_FAIL: (m) => `خطا در رونویسی صدا: ${m}`,
   TRANSLATE_FAIL: (m) => `خطا در ترجمه به فارسی: ${m}`,
   YT_NO_CAPTIONS: "زیرنویس این ویدیوی یوتیوب قابل دریافت نبود. ویدیویی با زیرنویس (CC) امتحان کنید یا فایل را مستقیم آپلود کنید.",
+  YT_NO_KEY: "برای دریافت زیرنویس یوتیوب باید کلید SUPADATA_API_KEY را در متغیرهای محیطی همین پروژه‌ی Vercel (برای هر دو محیط Preview و Production) تنظیم و سپس دوباره Deploy کنید. تا آن زمان می‌توانید فایل ویدیو را مستقیم آپلود کنید.",
   SERVER: (m) => `خطای سرور: ${m}`,
 };
 
@@ -74,15 +83,31 @@ export default async function handler(req, res) {
   if (!KEY) return res.status(500).json({ error: FA.NO_KEY, code: "NO_KEY" });
 
   try {
-    const { url, mediaBase64, mimeType } = req.body || {};
+    const { url, mediaBase64, mimeType, blobUrl } = req.body || {};
     let segments;
     const yid = url ? ytId(url) : null;
 
     if (yid) {
-      segments = await youtubeSegments(yid);
+      // YouTube — transcript-based, no size/length limit
+      segments = await youtubeSegments(yid, url);
       if (!segments || !segments.length) {
+        // Distinguish "key not configured in this deployment" from "captions truly
+        // unavailable" — the former is the most common cause of a red link error.
+        if (!SUPADATA_KEY) return res.status(422).json({ error: FA.YT_NO_KEY, code: "YT_NO_KEY" });
         return res.status(422).json({ error: FA.YT_NO_CAPTIONS, code: "YT_NO_CAPTIONS" });
       }
+    } else if (blobUrl) {
+      // Browser uploaded the file directly to Vercel Blob → read it back by URL.
+      if (!/^https?:\/\//i.test(blobUrl)) return res.status(400).json({ error: FA.INVALID_URL, code: "INVALID_URL" });
+      const r = await fetchT(blobUrl, {}, 30000);
+      if (!r.ok) return res.status(400).json({ error: FA.DOWNLOAD_FAIL(r.status), code: "DOWNLOAD_FAIL" });
+      const mt = (mimeType || r.headers.get("content-type") || "audio/mpeg").split(";")[0].trim();
+      const bytes = Buffer.from(await r.arrayBuffer());
+      if (!bytes.length) return res.status(400).json({ error: FA.EMPTY, code: "EMPTY" });
+      if (bytes.length > MAX_BYTES) return res.status(413).json({ error: FA.TOO_LARGE, code: "TOO_LARGE" });
+      segments = await transcribe(bytes, mt);
+      // Best-effort cleanup so uploaded media doesn't pile up in Blob storage.
+      try { const { del } = await import("@vercel/blob"); await del(blobUrl); } catch (e) {}
     } else if (mediaBase64) {
       const mt = (mimeType || "audio/mpeg").split(";")[0].trim();
       const bytes = Buffer.from(mediaBase64, "base64");
@@ -122,6 +147,12 @@ export default async function handler(req, res) {
 }
 
 // ── YouTube helpers ─────────────────────────────────────────────────────────
+//
+// YouTube heavily rate-limits / bot-blocks requests from cloud datacenter IPs
+// (Vercel, AWS, GCP), so hitting youtube.com directly from a serverless function
+// frequently returns NO caption tracks. Supadata is a purpose-built transcript API
+// that handles the IP-blocking on its side, so we try it first; the keyless
+// Piped / Invidious / InnerTube paths are best-effort fallbacks.
 
 function ytId(u) {
   const s = String(u || "");
@@ -129,81 +160,247 @@ function ytId(u) {
   return m ? m[1] : null;
 }
 
-// Get caption tracks via the InnerTube API (Android client — least IP-blocked),
-// falling back to scraping the watch page.
-async function captionTracks(id) {
-  // 1) InnerTube ANDROID client
-  try {
-    const r = await fetchT(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip" },
-      body: JSON.stringify({
-        context: { client: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 30, hl: "en", gl: "US" } },
-        videoId: id,
-      }),
-    }, 15000);
-    if (r.ok) {
-      const j = await r.json();
-      const tr = j?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (tr && tr.length) return tr;
-    }
-  } catch (e) {}
+const decodeEnt = (s) => String(s || "")
+  .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<")
+  .replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/<[^>]+>/g, "");
 
-  // 2) InnerTube WEB client
-  try {
-    const r = await fetchT(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": UA },
-      body: JSON.stringify({
-        context: { client: { clientName: "WEB", clientVersion: "2.20240101.00.00", hl: "en", gl: "US" } },
-        videoId: id,
-      }),
-    }, 15000);
-    if (r.ok) {
-      const j = await r.json();
-      const tr = j?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (tr && tr.length) return tr;
-    }
-  } catch (e) {}
+// Parse any caption payload (JSON3, XML timedtext, or WebVTT) into segments.
+function parseCaptions(raw) {
+  const text = String(raw || "");
+  if (!text.trim()) return [];
 
-  // 3) Scrape watch page
-  try {
-    const r = await fetchT(`https://www.youtube.com/watch?v=${id}&hl=en`, {
-      headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", "Cookie": "CONSENT=YES+1" },
-    }, 15000);
-    if (r.ok) {
-      const html = await r.text();
-      const m = html.match(/"captionTracks":(\[.*?\])/);
-      if (m) { try { return JSON.parse(m[1]); } catch (e) {} }
-    }
-  } catch (e) {}
+  // JSON3 (events[])
+  if (/^\s*\{/.test(text)) {
+    try {
+      const data = JSON.parse(text);
+      if (Array.isArray(data.events)) {
+        return data.events
+          .filter((e) => e.segs && e.tStartMs != null)
+          .map((e) => ({
+            start: e.tStartMs / 1000,
+            end: (e.tStartMs + (e.dDurationMs || 1500)) / 1000,
+            text: e.segs.map((s) => s.utf8 || "").join("").replace(/\s+/g, " ").trim(),
+          }))
+          .filter((s) => s.text);
+      }
+    } catch (e) {}
+  }
 
+  // WebVTT
+  if (/^\s*WEBVTT/.test(text)) {
+    const segs = [];
+    const re = /(\d{1,2}:)?(\d{1,2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}:)?(\d{1,2}):(\d{2})[.,](\d{3})[^\n]*\n([\s\S]*?)(?=\n\s*\n|\n\s*\d{1,2}:|\s*$)/g;
+    let m;
+    const toSec = (h, mm, ss, ms) => (+(h || 0)) * 3600 + +mm * 60 + +ss + +ms / 1000;
+    while ((m = re.exec(text)) !== null) {
+      const start = toSec((m[1] || "").replace(":", ""), m[2], m[3], m[4]);
+      const end = toSec((m[5] || "").replace(":", ""), m[6], m[7], m[8]);
+      const body = decodeEnt(m[9].replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+      if (body) segs.push({ start, end, text: body });
+    }
+    if (segs.length) return segs;
+  }
+
+  // TTML (<p begin="..." end="...">) — Piped and some YouTube tracks serve this
+  if (/<tt[\s>]|<p\b[^>]*\bbegin=/.test(text)) {
+    const ttmlTime = (v) => {
+      if (v == null) return null;
+      const s = String(v).trim();
+      if (/^\d+(\.\d+)?s$/.test(s)) return parseFloat(s);          // "1.5s"
+      if (/^\d+(\.\d+)?ms$/.test(s)) return parseFloat(s) / 1000;  // "100ms"
+      const c = s.match(/^(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?$/); // HH:MM:SS.mmm
+      if (c) return (+(c[1] || 0)) * 3600 + +c[2] * 60 + +c[3] + (c[4] ? parseFloat(`0.${c[4]}`) : 0);
+      const f = parseFloat(s);
+      return isNaN(f) ? null : f;
+    };
+    const ttmlSegs = [];
+    const tre = /<p\b[^>]*\bbegin="([^"]+)"[^>]*?(?:\bend="([^"]+)")?[^>]*>([\s\S]*?)<\/p>/g;
+    let tm;
+    while ((tm = tre.exec(text)) !== null) {
+      const start = ttmlTime(tm[1]);
+      if (start == null) continue;
+      let end = ttmlTime(tm[2]);
+      if (end == null) end = start + 1.5;
+      const body = decodeEnt(tm[3].replace(/<br\s*\/?>/gi, " ").replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+      if (body) ttmlSegs.push({ start, end, text: body });
+    }
+    if (ttmlSegs.length) return ttmlSegs;
+  }
+
+  // XML timedtext (<text start="" dur="">)
+  const xmlSegs = [];
+  const re = /<text[^>]*\bstart="([\d.]+)"[^>]*?(?:\bdur="([\d.]+)")?[^>]*>([\s\S]*?)<\/text>/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const start = parseFloat(m[1]);
+    const dur = parseFloat(m[2] || "1.5");
+    const body = decodeEnt(m[3].replace(/\n/g, " ")).replace(/\s+/g, " ").trim();
+    if (body) xmlSegs.push({ start, end: start + dur, text: body });
+  }
+  return xmlSegs;
+}
+
+// Primary — Supadata transcript API (handles datacenter IP-blocking on its side).
+// GET /v1/youtube/transcript → { content: [{ text, offset(ms), duration(ms) }], ... }
+// Hardened against response-shape and time-unit variations, with the unified
+// /v1/transcript endpoint as a secondary shape. Logs failures to the function log.
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+
+async function supadataSegments(id, url) {
+  if (!SUPADATA_KEY) return [];
+  const watch = url || `https://www.youtube.com/watch?v=${id}`;
+  const endpoints = [
+    `https://api.supadata.ai/v1/youtube/transcript?${url ? `url=${encodeURIComponent(url)}` : `videoId=${encodeURIComponent(id)}`}&text=false`,
+    `https://api.supadata.ai/v1/transcript?url=${encodeURIComponent(watch)}&text=false`,
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      // Send both header styles so we don't depend on Supadata's exact auth scheme.
+      const r = await fetchT(ep, { headers: { "x-api-key": SUPADATA_KEY, "Authorization": `Bearer ${SUPADATA_KEY}` } }, 25000);
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        console.error(`[supadata] HTTP ${r.status} ${body.slice(0, 200)}`);
+        continue;
+      }
+      const j = await r.json().catch(() => null);
+      // Accept the documented `content` array plus a few likely aliases.
+      const arr = Array.isArray(j?.content) ? j.content
+        : Array.isArray(j?.transcript) ? j.transcript
+        : Array.isArray(j?.data) ? j.data
+        : Array.isArray(j) ? j
+        : null;
+      if (!arr || !arr.length) {
+        console.error(`[supadata] no transcript array in response: ${JSON.stringify(j).slice(0, 200)}`);
+        continue;
+      }
+
+      let segs = arr.map((c) => {
+        const start = num(c.offset ?? c.start ?? c.startMs ?? c.tStartMs ?? c.startTime);
+        const dur = num(c.duration ?? c.dur ?? c.durationMs);
+        const text = String(c.text ?? c.content ?? c.segment ?? "").replace(/\s+/g, " ").trim();
+        return { start: start / 1000, end: (start + (dur || 1500)) / 1000, text };
+      }).filter((s) => s.text);
+      if (!segs.length) continue;
+
+      // Unit guard: offsets are documented in milliseconds. If they actually arrived
+      // in seconds, the /1000 above makes cue durations absurdly small — rescale.
+      const durs = segs.map((s) => s.end - s.start).filter((d) => d > 0).sort((a, b) => a - b);
+      const med = durs.length ? durs[Math.floor(durs.length / 2)] : 1;
+      if (med > 0 && med < 0.02) segs = segs.map((s) => ({ start: s.start * 1000, end: s.end * 1000, text: s.text }));
+
+      return segs;
+    } catch (e) {
+      console.error(`[supadata] ${String((e && e.message) || e)}`);
+    }
+  }
   return [];
 }
 
-async function youtubeSegments(id) {
-  const tracks = await captionTracks(id);
-  if (!tracks || !tracks.length) return [];
+// Public Piped API instances (return subtitle URLs). Tried in order.
+const PIPED_HOSTS = [
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://pipedapi.leptons.xyz",
+  "https://api.piped.yt",
+];
 
-  // Prefer English; otherwise the first track (usually the original language).
-  const track = tracks.find((t) => /^en/i.test(t.languageCode || "")) || tracks[0];
-  let base = (track.baseUrl || "").replace(/\\u0026/g, "&").replace(/\\\//g, "/");
-  if (!base) return [];
-  if (!/[?&]fmt=/.test(base)) base += "&fmt=json3";
+// Public Invidious instances (return caption VTT). Tried in order.
+const INVIDIOUS_HOSTS = [
+  "https://invidious.nerdvpn.de",
+  "https://inv.nadeko.net",
+  "https://invidious.fdn.fr",
+  "https://yewtu.be",
+];
 
-  const cap = await fetchT(base, { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" } }, 15000);
-  if (!cap.ok) return [];
-  const data = await cap.json().catch(() => null);
-  if (!data || !Array.isArray(data.events)) return [];
+function pickEnglish(list, langOf) {
+  return list.find((x) => /^en/i.test(langOf(x) || "")) || list[0];
+}
 
-  return data.events
-    .filter((e) => e.segs && (e.tStartMs != null))
-    .map((e) => ({
-      start: e.tStartMs / 1000,
-      end: (e.tStartMs + (e.dDurationMs || 1500)) / 1000,
-      text: e.segs.map((s) => s.utf8 || "").join("").replace(/\s+/g, " ").trim(),
-    }))
-    .filter((s) => s.text);
+// Fallback 1 — Piped: GET /streams/{id} → subtitles[{url, code}]
+async function pipedSegments(id) {
+  for (const host of PIPED_HOSTS) {
+    try {
+      const r = await fetchT(`${host}/streams/${id}`, { headers: { Accept: "application/json" } }, 8000);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const subs = j?.subtitles;
+      if (!Array.isArray(subs) || !subs.length) continue;
+      const pick = pickEnglish(subs, (s) => s.code || s.language);
+      if (!pick?.url) continue;
+      const cr = await fetchT(pick.url, { headers: { "User-Agent": UA } }, 8000);
+      if (!cr.ok) continue;
+      const segs = parseCaptions(await cr.text());
+      if (segs.length) return segs;
+    } catch (e) {}
+  }
+  return [];
+}
+
+// Fallback 2 — Invidious: GET /api/v1/captions/{id} → captions[{languageCode, url}]
+async function invidiousSegments(id) {
+  for (const host of INVIDIOUS_HOSTS) {
+    try {
+      const r = await fetchT(`${host}/api/v1/captions/${id}`, { headers: { Accept: "application/json" } }, 8000);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const caps = j?.captions;
+      if (!Array.isArray(caps) || !caps.length) continue;
+      const pick = pickEnglish(caps, (c) => c.languageCode || c.language_code);
+      const capUrl = pick?.url ? (pick.url.startsWith("http") ? pick.url : host + pick.url) : null;
+      if (!capUrl) continue;
+      const cr = await fetchT(capUrl, { headers: { "User-Agent": UA } }, 8000);
+      if (!cr.ok) continue;
+      const segs = parseCaptions(await cr.text());
+      if (segs.length) return segs;
+    } catch (e) {}
+  }
+  return [];
+}
+
+// Fallback 3 — Direct YouTube InnerTube (best-effort; usually blocked from cloud IPs)
+async function innertubeSegments(id) {
+  const clients = [
+    { headers: { "Content-Type": "application/json", "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip" },
+      key: INNERTUBE_KEY, ctx: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 30, hl: "en", gl: "US" } },
+    { headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/537.36 SamsungBrowser/2.1 TV Safari/537.36" },
+      key: null, ctx: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" } },
+    { headers: { "Content-Type": "application/json", "User-Agent": UA },
+      key: INNERTUBE_KEY, ctx: { clientName: "WEB", clientVersion: "2.20240101.00.00", hl: "en", gl: "US" } },
+  ];
+  for (const c of clients) {
+    try {
+      const u = `https://www.youtube.com/youtubei/v1/player${c.key ? `?key=${c.key}` : ""}`;
+      const r = await fetchT(u, { method: "POST", headers: c.headers, body: JSON.stringify({ context: { client: c.ctx }, videoId: id }) }, 9000);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const tr = j?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (!tr || !tr.length) continue;
+      const track = pickEnglish(tr, (t) => t.languageCode);
+      let base = (track.baseUrl || "").replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+      if (!base) continue;
+      if (!/[?&]fmt=/.test(base)) base += "&fmt=json3";
+      const cap = await fetchT(base, { headers: { "User-Agent": UA } }, 9000);
+      if (!cap.ok) continue;
+      const segs = parseCaptions(await cap.text());
+      if (segs.length) return segs;
+    } catch (e) {}
+  }
+  return [];
+}
+
+// Try every caption source in order of reliability from a datacenter IP.
+async function youtubeSegments(id, url) {
+  let segs = await supadataSegments(id, url);
+  if (segs.length) { console.log(`[yt] supadata → ${segs.length} cues`); return segs; }
+  segs = await pipedSegments(id);
+  if (segs.length) { console.log(`[yt] piped → ${segs.length} cues`); return segs; }
+  segs = await invidiousSegments(id);
+  if (segs.length) { console.log(`[yt] invidious → ${segs.length} cues`); return segs; }
+  segs = await innertubeSegments(id);
+  if (segs.length) { console.log(`[yt] innertube → ${segs.length} cues`); return segs; }
+  console.warn(`[yt] no captions found for ${id} (key set: ${!!SUPADATA_KEY})`);
+  return [];
 }
 
 // ── Groq Whisper transcription ──────────────────────────────────────────────
