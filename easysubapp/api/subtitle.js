@@ -238,31 +238,58 @@ function parseCaptions(raw) {
 
 // Primary — Supadata transcript API (handles datacenter IP-blocking on its side).
 // GET /v1/youtube/transcript → { content: [{ text, offset(ms), duration(ms) }], ... }
+// Hardened against response-shape and time-unit variations, with the unified
+// /v1/transcript endpoint as a secondary shape. Logs failures to the function log.
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+
 async function supadataSegments(id, url) {
   if (!SUPADATA_KEY) return [];
-  const q = url ? `url=${encodeURIComponent(url)}` : `videoId=${encodeURIComponent(id)}`;
-  try {
-    const r = await fetchT(`https://api.supadata.ai/v1/youtube/transcript?${q}&text=false`, {
-      headers: { "x-api-key": SUPADATA_KEY },
-    }, 25000);
-    if (!r.ok) return [];
-    const j = await r.json().catch(() => null);
-    const content = j && j.content;
-    if (!Array.isArray(content) || !content.length) return [];
-    return content
-      .map((c) => {
-        const startMs = c.offset != null ? c.offset : (c.start != null ? c.start : 0);
-        const durMs = c.duration != null ? c.duration : (c.dur != null ? c.dur : 1500);
-        return {
-          start: startMs / 1000,
-          end: (startMs + durMs) / 1000,
-          text: String(c.text || "").replace(/\s+/g, " ").trim(),
-        };
-      })
-      .filter((s) => s.text);
-  } catch (e) {
-    return [];
+  const watch = url || `https://www.youtube.com/watch?v=${id}`;
+  const endpoints = [
+    `https://api.supadata.ai/v1/youtube/transcript?${url ? `url=${encodeURIComponent(url)}` : `videoId=${encodeURIComponent(id)}`}&text=false`,
+    `https://api.supadata.ai/v1/transcript?url=${encodeURIComponent(watch)}&text=false`,
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const r = await fetchT(ep, { headers: { "x-api-key": SUPADATA_KEY } }, 25000);
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        console.error(`[supadata] HTTP ${r.status} ${body.slice(0, 200)}`);
+        continue;
+      }
+      const j = await r.json().catch(() => null);
+      // Accept the documented `content` array plus a few likely aliases.
+      const arr = Array.isArray(j?.content) ? j.content
+        : Array.isArray(j?.transcript) ? j.transcript
+        : Array.isArray(j?.data) ? j.data
+        : Array.isArray(j) ? j
+        : null;
+      if (!arr || !arr.length) {
+        console.error(`[supadata] no transcript array in response: ${JSON.stringify(j).slice(0, 200)}`);
+        continue;
+      }
+
+      let segs = arr.map((c) => {
+        const start = num(c.offset ?? c.start ?? c.startMs ?? c.tStartMs ?? c.startTime);
+        const dur = num(c.duration ?? c.dur ?? c.durationMs);
+        const text = String(c.text ?? c.content ?? c.segment ?? "").replace(/\s+/g, " ").trim();
+        return { start: start / 1000, end: (start + (dur || 1500)) / 1000, text };
+      }).filter((s) => s.text);
+      if (!segs.length) continue;
+
+      // Unit guard: offsets are documented in milliseconds. If they actually arrived
+      // in seconds, the /1000 above makes cue durations absurdly small — rescale.
+      const durs = segs.map((s) => s.end - s.start).filter((d) => d > 0).sort((a, b) => a - b);
+      const med = durs.length ? durs[Math.floor(durs.length / 2)] : 1;
+      if (med > 0 && med < 0.02) segs = segs.map((s) => ({ start: s.start * 1000, end: s.end * 1000, text: s.text }));
+
+      return segs;
+    } catch (e) {
+      console.error(`[supadata] ${String((e && e.message) || e)}`);
+    }
   }
+  return [];
 }
 
 // Public Piped API instances (return subtitle URLs). Tried in order.
@@ -360,13 +387,14 @@ async function innertubeSegments(id) {
 // Try every caption source in order of reliability from a datacenter IP.
 async function youtubeSegments(id, url) {
   let segs = await supadataSegments(id, url);
-  if (segs.length) return segs;
+  if (segs.length) { console.log(`[yt] supadata → ${segs.length} cues`); return segs; }
   segs = await pipedSegments(id);
-  if (segs.length) return segs;
+  if (segs.length) { console.log(`[yt] piped → ${segs.length} cues`); return segs; }
   segs = await invidiousSegments(id);
-  if (segs.length) return segs;
+  if (segs.length) { console.log(`[yt] invidious → ${segs.length} cues`); return segs; }
   segs = await innertubeSegments(id);
-  if (segs.length) return segs;
+  if (segs.length) { console.log(`[yt] innertube → ${segs.length} cues`); return segs; }
+  console.warn(`[yt] no captions found for ${id} (key set: ${!!SUPADATA_KEY})`);
   return [];
 }
 
