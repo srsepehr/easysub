@@ -129,10 +129,27 @@ function ytId(u) {
   return m ? m[1] : null;
 }
 
-// Get caption tracks via the InnerTube API (Android client — least IP-blocked),
-// falling back to scraping the watch page.
+// Get caption tracks — tries multiple YouTube APIs in order of reliability from
+// datacenter IPs. Returns an array of track objects with baseUrl.
 async function captionTracks(id) {
-  // 1) InnerTube ANDROID client
+  // 1) InnerTube TVHTML5 embedded client (least fingerprinted, often unblocked)
+  try {
+    const r = await fetchT("https://www.youtube.com/youtubei/v1/player", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/2.1 Chrome/56.0.2924.0 TV Safari/537.36" },
+      body: JSON.stringify({
+        context: { client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" } },
+        videoId: id,
+      }),
+    }, 15000);
+    if (r.ok) {
+      const j = await r.json();
+      const tr = j?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (tr && tr.length) return tr;
+    }
+  } catch (e) {}
+
+  // 2) InnerTube ANDROID client
   try {
     const r = await fetchT(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}`, {
       method: "POST",
@@ -149,7 +166,7 @@ async function captionTracks(id) {
     }
   } catch (e) {}
 
-  // 2) InnerTube WEB client
+  // 3) InnerTube WEB client
   try {
     const r = await fetchT(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}`, {
       method: "POST",
@@ -166,7 +183,26 @@ async function captionTracks(id) {
     }
   } catch (e) {}
 
-  // 3) Scrape watch page
+  // 4) Legacy timedtext list API (often works from datacenter IPs)
+  try {
+    const listUrl = `https://video.google.com/timedtext?type=list&v=${id}`;
+    const r = await fetchT(listUrl, { headers: { "User-Agent": UA } }, 10000);
+    if (r.ok) {
+      const xml = await r.text();
+      // Parse tracks from <track id="..." name="" lang_code="en" .../>
+      const tracks = [];
+      const re = /<track[^>]+lang_code="([^"]*)"[^>]*name="([^"]*)"[^>]*\/?>/g;
+      let m;
+      while ((m = re.exec(xml)) !== null) {
+        const lang = m[1], name = m[2];
+        const base = `https://video.google.com/timedtext?v=${id}&lang=${encodeURIComponent(lang)}&name=${encodeURIComponent(name)}&fmt=json3`;
+        tracks.push({ languageCode: lang, name: { simpleText: name }, baseUrl: base });
+      }
+      if (tracks.length) return tracks;
+    }
+  } catch (e) {}
+
+  // 5) Scrape watch page as last resort
   try {
     const r = await fetchT(`https://www.youtube.com/watch?v=${id}&hl=en`, {
       headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", "Cookie": "CONSENT=YES+1" },
@@ -193,17 +229,36 @@ async function youtubeSegments(id) {
 
   const cap = await fetchT(base, { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" } }, 15000);
   if (!cap.ok) return [];
-  const data = await cap.json().catch(() => null);
-  if (!data || !Array.isArray(data.events)) return [];
 
-  return data.events
-    .filter((e) => e.segs && (e.tStartMs != null))
-    .map((e) => ({
-      start: e.tStartMs / 1000,
-      end: (e.tStartMs + (e.dDurationMs || 1500)) / 1000,
-      text: e.segs.map((s) => s.utf8 || "").join("").replace(/\s+/g, " ").trim(),
-    }))
-    .filter((s) => s.text);
+  const rawText = await cap.text().catch(() => "");
+  if (!rawText) return [];
+
+  // Try JSON3 format first
+  try {
+    const data = JSON.parse(rawText);
+    if (data && Array.isArray(data.events)) {
+      return data.events
+        .filter((e) => e.segs && (e.tStartMs != null))
+        .map((e) => ({
+          start: e.tStartMs / 1000,
+          end: (e.tStartMs + (e.dDurationMs || 1500)) / 1000,
+          text: e.segs.map((s) => s.utf8 || "").join("").replace(/\s+/g, " ").trim(),
+        }))
+        .filter((s) => s.text);
+    }
+  } catch (e) {}
+
+  // Fallback: parse XML timedtext format
+  const xmlSegs = [];
+  const re = /<text start="([^"]+)" dur="([^"]+)"[^>]*>([\s\S]*?)<\/text>/g;
+  let m;
+  while ((m = re.exec(rawText)) !== null) {
+    const start = parseFloat(m[1]);
+    const dur = parseFloat(m[2]);
+    const text = m[3].replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/<[^>]+>/g, "").trim();
+    if (text) xmlSegs.push({ start, end: start + dur, text });
+  }
+  return xmlSegs;
 }
 
 // ── Groq Whisper transcription ──────────────────────────────────────────────
