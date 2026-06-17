@@ -2289,8 +2289,12 @@ function SubtitlePlayer({ item }) {
   const [playing, setPlaying] = React.useState(false);
   const [subsOn, setSubsOn] = React.useState(true);
   const [speed, setSpeed] = React.useState(1);
+  // Manual subtitle sync nudge (seconds). Positive = show subtitles earlier, to
+  // cancel out the lag of approximate generated-transcript timings.
+  const [offset, setOffset] = React.useState(0);
   const cues = item.cues || [];
-  const cur = subsOn ? cues.find((c) => tm >= c.start && tm <= c.end) : null;
+  const t0 = tm + offset;
+  const cur = subsOn ? cues.find((c) => t0 >= c.start && t0 <= c.end) : null;
   const hasMedia = isYT || !!item.mediaUrl;
 
   /* YouTube engine */
@@ -2442,6 +2446,13 @@ function SubtitlePlayer({ item }) {
                     <button type="button" onClick={() => setSubsOn(!subsOn)} className={`flex items-center gap-1.5 rounded-full px-3 h-8 text-xs transition-colors ${subsOn ? "bg-white text-black font-semibold" : "liquid-glass text-white/70"}`}>
                       <Ic name="captions" size={14} /> {t("زیرنویس فارسی", "Persian subs")}
                     </button>
+                    {subsOn && (
+                      <div className="liquid-glass hidden sm:flex items-center rounded-full h-8 text-xs text-white overflow-hidden" title={t("هم‌گام‌سازی زیرنویس", "Subtitle sync")}>
+                        <button type="button" onClick={() => setOffset((o) => Math.round((o - 0.25) * 100) / 100)} aria-label={t("زیرنویس دیرتر", "Subtitles later")} className="px-2.5 h-full hover:bg-white/10 transition-colors">−</button>
+                        <span className="px-1 tabular-nums min-w-[3rem] text-center" dir="ltr">{(offset > 0 ? "+" : "") + offset.toFixed(2)}s</span>
+                        <button type="button" onClick={() => setOffset((o) => Math.round((o + 0.25) * 100) / 100)} aria-label={t("زیرنویس زودتر", "Subtitles earlier")} className="px-2.5 h-full hover:bg-white/10 transition-colors">+</button>
+                      </div>
+                    )}
                     <button type="button" onClick={cycleSpeed} className="liquid-glass hidden sm:flex items-center gap-1 rounded-full px-3 h-8 text-xs text-white hover:bg-white/10 transition-colors">
                       <Ic name="gauge" size={14} /> {fa(speed)}×
                     </button>
