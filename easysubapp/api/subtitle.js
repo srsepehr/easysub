@@ -17,7 +17,7 @@
 //   SUPADATA_API_KEY      optional — reliable YouTube transcripts, https://supadata.ai
 //   BLOB_READ_WRITE_TOKEN auto-set when you enable Vercel Blob storage on the project
 //   WHISPER_MODEL         default whisper-large-v3-turbo
-//   TRANSLATE_MODEL       default llama-3.3-70b-versatile
+//   TRANSLATE_MODEL       default openai/gpt-oss-120b
 
 export const config = { maxDuration: 60 };
 
@@ -25,7 +25,7 @@ const GROQ = "https://api.groq.com/openai/v1";
 const KEY = process.env.GROQ_API_KEY;
 const SUPADATA_KEY = process.env.SUPADATA_API_KEY;
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "whisper-large-v3-turbo";
-const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "llama-3.3-70b-versatile";
+const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "openai/gpt-oss-120b";
 const MAX_BYTES = 24 * 1024 * 1024; // Groq Whisper hard limit: 25 MB
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
@@ -552,11 +552,14 @@ async function translateToPersian(texts) {
 async function translateChunk(texts, attempt = 0) {
   const numbered = texts.map((t, i) => `${i + 1}. ${t}`).join("\n");
   const prompt =
-    "You are a Persian subtitle translator. Translate each numbered line to fluent, natural, modern Persian (Farsi).\n" +
+    "You are a professional Persian (Farsi) subtitle translator. Translate each " +
+    "numbered line into natural, fluent, idiomatic modern Persian the way a native " +
+    "speaker actually talks. Convey the meaning and tone — do NOT translate word for word.\n" +
     "Rules:\n" +
-    "- Output ONLY the translated lines, numbered exactly like the input.\n" +
-    "- One translation per line. No extra text, no explanations.\n" +
-    "- Keep lines short (max 42 characters) for subtitles.\n\n" +
+    "- Output ONLY the translations, each on its own line, numbered exactly like the input (1., 2., ...).\n" +
+    "- Exactly one translation per input line, in the same order and count.\n" +
+    "- Use everyday conversational Persian; keep proper nouns and brand names as-is.\n" +
+    "- No transliteration, no notes, no English, do not repeat the original text.\n\n" +
     numbered;
 
   let r, data;
@@ -567,8 +570,9 @@ async function translateChunk(texts, attempt = 0) {
       body: JSON.stringify({
         model: TRANSLATE_MODEL,
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.15,
+        temperature: 0.3,
         max_tokens: 8192,
+        reasoning_effort: "low", // gpt-oss: keep reasoning minimal so output stays clean & fast
       }),
     }, 50000);
     data = await r.json().catch(() => null);
@@ -587,15 +591,18 @@ async function translateChunk(texts, attempt = 0) {
   }
 
   const content = (data.choices?.[0]?.message?.content || "")
-    .replace(/<think>[\s\S]*?<\/think>/gi, "") // strip any stray Qwen3 reasoning
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")   // strip any stray reasoning block
+    .replace(/<\|[^|]*\|>/g, "")                  // strip any harmony channel markers
     .trim();
-  const lines = content
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => /^\d+\./.test(l))
-    .map((l) => l.replace(/^\d+\.\s*/, "").trim());
+  const all = content.split("\n").map((l) => l.trim()).filter(Boolean);
+  const parsed = all
+    .filter((l) => /^\d+[.)]/.test(l))
+    .map((l) => l.replace(/^\d+[.)]\s*/, "").trim())
+    .filter(Boolean);
 
-  if (lines.length === texts.length) return lines;
+  if (parsed.length === texts.length) return parsed;
+  if (parsed.length > texts.length) return parsed.slice(0, texts.length);
+  if (all.length === texts.length) return all;
   return texts; // shape mismatch: non-blocking fallback
 }
 
