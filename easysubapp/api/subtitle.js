@@ -282,8 +282,17 @@ function supadataToSegs(j) {
   // seconds. Detect the unit from the largest value: only a millisecond clock
   // produces values in the thousands for any non-trivial video. Guessing wrong
   // here collapses every cue into the first ~2s, so subtitles never show.
-  const maxV = rows.reduce((m, r) => Math.max(m, r.start, r.dur), 0);
-  const div = maxV > 1000 ? 1000 : 1;
+  // Detect the time unit robustly from the spacing between consecutive cues:
+  // subtitle lines sit ~1-6s apart, so a millisecond clock shows gaps in the
+  // hundreds/thousands while a seconds clock shows single digits. Using the max
+  // value alone misfires on long videos and mis-scales every timestamp.
+  const sorted = rows.map((r) => r.start).sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < sorted.length; i++) { const g = sorted[i] - sorted[i - 1]; if (g > 0) gaps.push(g); }
+  gaps.sort((a, b) => a - b);
+  const medGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
+  const maxDur = rows.reduce((m, r) => Math.max(m, r.dur), 0);
+  const div = (medGap > 50 || maxDur > 1000) ? 1000 : 1; // 1000 → values are milliseconds
   const segs = rows
     .map((r) => {
       const start = r.start / div;
@@ -585,7 +594,7 @@ async function translateChunk(texts, attempt = 0) {
       body: JSON.stringify({
         model: TRANSLATE_MODEL,
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.9,
+        temperature: 0.3, // low enough to keep the numbered format intact (high temp → English fallback)
         max_tokens: 8192,
       }),
     }, 50000);
@@ -596,9 +605,11 @@ async function translateChunk(texts, attempt = 0) {
   }
 
   if (!r.ok || !data) {
-    // Rate limit (429) or transient server error: back off and retry.
-    if ((r.status === 429 || r.status >= 500) && attempt < 2) {
-      await sleep(1200 * (attempt + 1));
+    // Rate limit (429) or transient server error: honor Retry-After, then back off.
+    if ((r.status === 429 || r.status >= 500) && attempt < 3) {
+      const ra = parseFloat(r.headers.get("retry-after"));
+      const wait = Math.min((ra > 0 ? ra * 1000 + 300 : 1000 * (attempt + 1)), 6000);
+      await sleep(wait);
       return translateChunk(texts, attempt + 1);
     }
     return texts; // give up gracefully: keep source text
