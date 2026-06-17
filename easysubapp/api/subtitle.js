@@ -17,7 +17,7 @@
 //   SUPADATA_API_KEY      optional — reliable YouTube transcripts, https://supadata.ai
 //   BLOB_READ_WRITE_TOKEN auto-set when you enable Vercel Blob storage on the project
 //   WHISPER_MODEL         default whisper-large-v3-turbo
-//   TRANSLATE_MODEL       default openai/gpt-oss-120b
+//   TRANSLATE_MODEL       default llama-3.3-70b-versatile
 
 export const config = { maxDuration: 60 };
 
@@ -25,7 +25,7 @@ const GROQ = "https://api.groq.com/openai/v1";
 const KEY = process.env.GROQ_API_KEY;
 const SUPADATA_KEY = process.env.SUPADATA_API_KEY;
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "whisper-large-v3-turbo";
-const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "openai/gpt-oss-120b";
+const TRANSLATE_MODEL = process.env.TRANSLATE_MODEL || "llama-3.3-70b-versatile";
 const MAX_BYTES = 24 * 1024 * 1024; // Groq Whisper hard limit: 25 MB
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
@@ -545,6 +545,19 @@ async function translateToPersian(texts) {
   return results.flat();
 }
 
+// Force model output to clean Persian: normalize Arabic letterforms to their
+// Persian equivalents and strip any foreign scripts (Chinese/Japanese/Korean/
+// Cyrillic) and zero-width junk that occasionally leak into the translation.
+function cleanFa(s) {
+  return String(s || "")
+    .replace(/ي/g, "ی")  // Arabic yeh  ي → Persian yeh ی
+    .replace(/ك/g, "ک")  // Arabic kaf  ك → Persian kaf ک
+    .replace(/[一-鿿㐀-䶿豈-﫿぀-ヿ가-힯Ѐ-ӿ]/g, "") // CJK + Cyrillic
+    .replace(/[​-‍﻿]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 // Translate one batch. Resilient by design: transient failures (rate limits,
 // 5xx, timeouts) are retried with backoff, and if a batch still can't be
 // translated we keep the original lines instead of failing the whole job — the
@@ -554,10 +567,12 @@ async function translateChunk(texts, attempt = 0) {
   const prompt =
     "You are a professional Persian (Farsi) subtitle translator. Translate each " +
     "numbered line into natural, fluent, idiomatic modern Persian the way a native " +
-    "speaker actually talks. Convey the meaning and tone — do NOT translate word for word.\n" +
+    "Iranian speaker actually talks. Convey the meaning and tone — do NOT translate word for word.\n" +
     "Rules:\n" +
     "- Output ONLY the translations, each on its own line, numbered exactly like the input (1., 2., ...).\n" +
     "- Exactly one translation per input line, in the same order and count.\n" +
+    "- Write in PERSIAN (Farsi) ONLY — NOT Arabic. Use Persian words and grammar, not Arabic ones.\n" +
+    "- Use ONLY the Persian/Arabic script. NEVER output Chinese, Japanese, Korean, Cyrillic or any other script.\n" +
     "- Use everyday conversational Persian; keep proper nouns and brand names as-is.\n" +
     "- No transliteration, no notes, no English, do not repeat the original text.\n\n" +
     numbered;
@@ -570,9 +585,8 @@ async function translateChunk(texts, attempt = 0) {
       body: JSON.stringify({
         model: TRANSLATE_MODEL,
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.3,
+        temperature: 0.9,
         max_tokens: 8192,
-        reasoning_effort: "low", // gpt-oss: keep reasoning minimal so output stays clean & fast
       }),
     }, 50000);
     data = await r.json().catch(() => null);
@@ -600,9 +614,10 @@ async function translateChunk(texts, attempt = 0) {
     .map((l) => l.replace(/^\d+[.)]\s*/, "").trim())
     .filter(Boolean);
 
-  if (parsed.length === texts.length) return parsed;
-  if (parsed.length > texts.length) return parsed.slice(0, texts.length);
-  if (all.length === texts.length) return all;
+  const finish = (arr) => arr.map((s, i) => cleanFa(s) || texts[i]);
+  if (parsed.length === texts.length) return finish(parsed);
+  if (parsed.length > texts.length) return finish(parsed.slice(0, texts.length));
+  if (all.length === texts.length) return finish(all);
   return texts; // shape mismatch: non-blocking fallback
 }
 
